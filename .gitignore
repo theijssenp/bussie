@@ -1,0 +1,13 @@
+# Data bestanden (te groot voor git)
+data/gtfs-nl.zip
+data/groningen.json
+data/traces.db
+data/traces.db-wal
+data/traces.db-shm
+
+# Python
+__pycache__/
+*.pyc
+
+# Logs
+*.log

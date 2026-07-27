@@ -1,0 +1,16 @@
+[Unit]
+Description=Bussie — Live buskaart backend
+After=network.target
+
+[Service]
+Type=simple
+User=pieter
+Group=pieter
+WorkingDirectory=/home/pieter/hodc/bussie
+Environment=BUSSIE_PORT=8900
+ExecStart=/usr/bin/python3 /home/pieter/hodc/bussie/backend/gtfs_processor.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

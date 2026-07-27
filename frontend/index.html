@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="nl" data-theme="light">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Bussie — Live buskaart Groningen</title>
+  <meta name="description" content="Een schattige isometrische kaart van het openbaar vervoer in Groningen, live in beweging.">
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <style>
+    /* === Reset & base === */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #dee9f0;
+      --fg: #2b3038;
+      --muted: rgba(43,48,56,0.55);
+      --panel: rgba(255,255,255,0.82);
+      --panel-border: rgba(43,48,56,0.10);
+      --accent: #d65a1a;
+      --accent-soft: rgba(214,90,26,0.12);
+      --frost: blur(12px) saturate(1.2);
+      --shadow: 0 6px 20px rgba(20,28,40,0.10);
+      --radius: 12px;
+      --font: "Sora Variable", system-ui, -apple-system, sans-serif;
+      --mono: "JetBrains Mono Variable", ui-monospace, monospace;
+    }
+    :root[data-theme="dark"] {
+      --bg: #10151d;
+      --fg: #e7ecf2;
+      --muted: rgba(231,236,242,0.50);
+      --panel: rgba(22,28,38,0.82);
+      --panel-border: rgba(231,236,242,0.08);
+      --shadow: 0 6px 20px rgba(0,0,0,0.30);
+    }
+    html, body { height: 100%; overflow: hidden; }
+    body {
+      font-family: var(--font);
+      background: var(--bg);
+      color: var(--fg);
+      font-size: 14px;
+      line-height: 1.5;
+      transition: background 0.3s, color 0.3s;
+    }
+
+    /* === Boot loader === */
+    #boot {
+      position: fixed; inset: 0; z-index: 9999;
+      display: grid; place-items: center;
+      background: var(--bg); transition: opacity 0.35s;
+    }
+    #boot-inner { width: 172px; text-align: center; }
+    #boot-title { font-size: 14px; font-weight: 700; letter-spacing: 0.16em; text-transform: uppercase; color: var(--fg); opacity: 0.9; }
+    #boot-track { margin: 15px 0 9px; height: 3px; border-radius: 3px; background: rgba(20,30,45,0.12); overflow: hidden; }
+    #boot-bar { height: 100%; width: 0%; border-radius: 3px; background: var(--accent); transition: width 0.15s; }
+    #boot-msg { font-size: 11px; letter-spacing: 0.04em; color: var(--fg); opacity: 0.5; }
+
+    /* === Canvas === */
+    #kaart { display: block; width: 100%; height: 100%; touch-action: none; cursor: grab; }
+    #kaart:active { cursor: grabbing; }
+
+    /* === UI panels === */
+    .panel {
+      position: absolute;
+      background: var(--panel);
+      border: 1px solid var(--panel-border);
+      backdrop-filter: var(--frost);
+      box-shadow: var(--shadow);
+      border-radius: var(--radius);
+      user-select: none;
+    }
+
+    /* Title panel (top-left) */
+    #titel-panel {
+      top: 16px; left: 16px;
+      padding: 10px 14px;
+    }
+    #titel-panel h1 { font-size: 17px; font-weight: 700; letter-spacing: -0.2px; }
+    #titel-panel h1 span { color: var(--accent); }
+    #status-regel { font-size: 12px; margin-top: 2px; color: var(--muted); }
+    #status-regel .live { color: #2da44e; font-weight: 600; }
+    #status-regel .live::before { content: "●"; margin-right: 3px; animation: pulse 2s infinite; }
+    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+
+    /* Controls — rechts, horizontaal, boven het busoverzicht */
+    #controls {
+      position: absolute;
+      top: 16px; right: 16px;
+      display: flex; gap: 6px;
+    }
+    .knop {
+      padding: 6px 10px;
+      border: 1px solid var(--panel-border);
+      background: var(--panel);
+      backdrop-filter: var(--frost);
+      border-radius: var(--radius);
+      cursor: pointer;
+      font-family: var(--font);
+      font-size: 12px;
+      color: var(--fg);
+      box-shadow: var(--shadow);
+      transition: background 0.15s;
+    }
+    .knop:hover { background: var(--accent-soft); }
+    .knop.actief { border-color: var(--accent); color: var(--accent); }
+
+    /* Bus info popup */
+    #bus-info {
+      position: absolute;
+      display: none;
+      padding: 10px 12px;
+      min-width: 180px;
+      font-size: 13px;
+      z-index: 10;
+    }
+    #bus-info .lijn-badge {
+      display: inline-block;
+      background: var(--accent);
+      color: #fff;
+      font-weight: 700;
+      padding: 2px 8px;
+      border-radius: 6px;
+      font-size: 14px;
+      margin-bottom: 4px;
+    }
+    #bus-info .veld { margin-top: 2px; color: var(--muted); }
+    #bus-info .veld strong { color: var(--fg); font-weight: 600; }
+
+    /* Lijn filter dropdown */
+    #lijn-filter {
+      position: absolute;
+      top: 60px; right: 16px;
+      max-height: 400px;
+      overflow-y: auto;
+      display: none;
+      padding: 8px;
+      min-width: 200px;
+    }
+    #lijn-filter .lijn-item {
+      display: flex; align-items: center; gap: 8px;
+      padding: 4px 8px; border-radius: 6px; cursor: pointer;
+    }
+    #lijn-filter .lijn-item:hover { background: var(--accent-soft); }
+    #lijn-filter .lijn-item verborgen { opacity: 0.35; }
+    #lijn-filter .lijn-badge {
+      background: var(--accent); color: #fff;
+      font-weight: 700; padding: 1px 6px; border-radius: 4px;
+      font-size: 12px; min-width: 28px; text-align: center;
+    }
+    #lijn-filter .lijn-naam { flex: 1; font-size: 12px; color: var(--muted); }
+
+    /* Theme toggle */
+    #thema-knop { font-size: 16px; padding: 8px 10px; }
+
+    /* Loading indicator */
+    #laden {
+      position: absolute; bottom: 16px; left: 16px;
+      font-size: 11px; color: var(--muted);
+    }
+
+    /* Busoverzicht zijbalk (rechts) */
+    #busoverzicht {
+      position: absolute;
+      top: 60px; right: 16px;
+      width: 280px;
+      max-height: calc(100vh - 90px);
+      overflow-y: auto;
+      display: none;
+      padding: 0;
+    }
+    #busoverzicht .header {
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--panel-border);
+      font-size: 13px; font-weight: 700;
+      display: flex; justify-content: space-between; align-items: center;
+    }
+    #busoverzicht .header .aantal {
+      font-size: 11px; color: var(--muted); font-weight: 400;
+    }
+    #busoverzicht .lijn-groep {
+      border-bottom: 1px solid var(--panel-border);
+    }
+    #busoverzicht .lijn-header {
+      display: flex; align-items: center; gap: 8px;
+      padding: 8px 14px;
+      cursor: pointer;
+      transition: background 0.12s;
+    }
+    #busoverzicht .lijn-header:hover { background: var(--accent-soft); }
+    #busoverzicht .lijn-header .lijn-badge {
+      background: var(--accent); color: #fff;
+      font-weight: 700; padding: 2px 8px; border-radius: 5px;
+      font-size: 13px; min-width: 32px; text-align: center;
+    }
+    #busoverzicht .lijn-header .bestemming {
+      flex: 1; font-size: 12px; color: var(--fg);
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    #busoverzicht .lijn-header .count {
+      font-size: 11px; color: var(--muted);
+    }
+    #busoverzicht .lijn-header .chevron {
+      font-size: 10px; color: var(--muted);
+      transition: transform 0.15s;
+    }
+    #busoverzicht .lijn-groep.ingeklapt .chevron { transform: rotate(-90deg); }
+    #busoverzicht .bus-lijst {
+      overflow: hidden;
+      transition: max-height 0.2s;
+    }
+    #busoverzicht .lijn-groep.ingeklapt .bus-lijst { max-height: 0 !important; }
+    #busoverzicht .bus-item {
+      padding: 6px 14px 6px 50px;
+      font-size: 12px;
+      border-top: 1px solid var(--panel-border);
+      cursor: pointer;
+      transition: background 0.12s;
+    }
+    #busoverzicht .bus-item:hover { background: var(--accent-soft); }
+    #busoverzicht .bus-item.geselecteerd { background: var(--accent-soft); }
+    #busoverzicht .bus-item .rij { display: flex; justify-content: space-between; color: var(--muted); }
+    #busoverzicht .bus-item .rij strong { color: var(--fg); font-weight: 600; }
+    #busoverzicht .bus-item .status-dot {
+      display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+      margin-right: 4px; vertical-align: middle;
+    }
+    #busoverzicht .bus-item .status-dot.rijdt { background: #2da44e; }
+    #busoverzicht .bus-item .status-dot.halte { background: #d65a1a; }
+    #busoverzicht .bus-item .status-dot.aankomend { background: #e8a030; }
+  </style>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+</head>
+<body>
+  <div id="boot">
+    <div id="boot-inner">
+      <div id="boot-title">Bussie</div>
+      <div id="boot-track"><div id="boot-bar"></div></div>
+      <div id="boot-msg">Kaart laden…</div>
+    </div>
+  </div>
+
+  <canvas id="kaart"></canvas>
+
+  <!-- Titel -->
+  <div id="titel-panel" class="panel">
+    <h1>Bus<span>s</span>ie</h1>
+    <div id="status-regel"><span id="klok">--:--</span> · Groningen · <span class="live">live</span></div>
+  </div>
+
+  <!-- Controls -->
+  <div id="controls">
+    <button class="knop" id="thema-knop" title="Thema wisselen">☀</button>
+    <button class="knop" id="locatie-knop" title="Naar mijn locatie">📍</button>
+    <button class="knop" id="lijnen-knop" title="Lijnfilter">Lijnen</button>
+    <button class="knop" id="overzicht-knop" title="Busoverzicht">Bussen</button>
+  </div>
+
+  <!-- Lijn filter -->
+  <div id="lijn-filter" class="panel"></div>
+
+  <!-- Busoverzicht -->
+  <div id="busoverzicht" class="panel"></div>
+
+  <!-- Bus info popup -->
+  <div id="bus-info" class="panel"></div>
+
+  <!-- Status -->
+  <div id="laden"></div>
+
+  <script type="module" src="/js/kaart.js?v=6"></script>
+  <script type="module" src="/js/app.js?v=6"></script>
+</body>
+</html>
