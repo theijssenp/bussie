@@ -20,16 +20,22 @@ gtfs.ovapi.nl/nl/vehiclePositions.pb    ← Nederlandse open data (GTFS-RT proto
     - GTFS stops → bushaltes
     - Output: data/groningen.json
                                          ↓
+  backend/lijn_routes.py                 ← Eenmalige lijnroute generator
+    - Eén route per lijn én richting uit de statische GTFS
+    - Kleur uit routes.txt, haltes met afstand langs de route
+    - Output: data/lijnen.json
+                                         ↓
   frontend/js/kaart.js                  ← Canvas renderer
     - Eigen isometrische projectie (2:1 dimetrisch)
-    - 3D gebouwextrusie
+    - 3D gebouwextrusie met detailniveau per zoomstand
+    - Lijnen in eigen kleur, haltes, busjes in zijaanzicht
+    - Bussen glijden lángs hun lijn tussen twee peilingen
     - Pan/zoom/touch interaction
-    - Vehicle rendering met hover info
                                          ↓
   frontend/js/app.js                    ← App logic
-    - Polling /api/voertuigen elke 10s
-    - Lijnfilter, theme toggle, geolocatie
-    - Klok, status, UI panels
+    - Polling /api/voertuigen/db elke 20s
+    - Lijnfilter, busoverzicht, volgende halte
+    - Theme toggle, geolocatie, klok, status
 ```
 
 ## Data bronnen
@@ -48,14 +54,18 @@ gtfs.ovapi.nl/nl/vehiclePositions.pb    ← Nederlandse open data (GTFS-RT proto
 - `GET /api/gtfs-ids/groningen` — route_id → lijnnummer mapping
 - `GET /api/lijnen?stad=groningen` — actieve lijnen met bestemmingen
 - `GET /data/groningen.json` — statische kaartdata
+- `GET /data/lijnen.json` — lijnroutes met kleur, haltes en afstanden
 
 ## Installatie
 
 1. Kaartdata genereren (eenmalig):
    ```bash
    cd ~/hodc/bussie
-   python3 backend/kaart_generator.py
+   python3 backend/kaart_generator.py   # OSM → data/groningen.json
+   python3 backend/lijn_routes.py       # GTFS → data/lijnen.json
    ```
+   `lijn_routes.py` leest `data/gtfs-nl.zip`, dus draai dit opnieuw als de
+   dienstregeling wisselt (lijnen, kleuren of haltes veranderen dan).
 
 2. Backend starten:
    ```bash

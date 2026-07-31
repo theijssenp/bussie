@@ -14,11 +14,13 @@
       --bg: #dee9f0;
       --fg: #2b3038;
       --muted: rgba(43,48,56,0.55);
-      --panel: rgba(255,255,255,0.82);
-      --panel-border: rgba(43,48,56,0.10);
-      --accent: #d65a1a;
-      --accent-soft: rgba(214,90,26,0.12);
-      --frost: blur(12px) saturate(1.2);
+      --panel: rgba(255,255,255,0.80);
+      --panel-border: rgba(0,0,0,0.08);
+      --accent: #7fb4d6;
+      --accent-soft: rgba(127,180,214,0.12);
+      --frost-soft: blur(2px);
+      --frost: blur(8px);
+      --frost-strong: blur(10px);
       --shadow: 0 6px 20px rgba(20,28,40,0.10);
       --radius: 12px;
       --font: "Sora Variable", system-ui, -apple-system, sans-serif;
@@ -28,9 +30,20 @@
       --bg: #10151d;
       --fg: #e7ecf2;
       --muted: rgba(231,236,242,0.50);
-      --panel: rgba(22,28,38,0.82);
-      --panel-border: rgba(231,236,242,0.08);
+      --panel: rgba(22,28,38,0.80);
+      --panel-border: rgba(255,255,255,0.12);
       --shadow: 0 6px 20px rgba(0,0,0,0.30);
+    }
+    @media (pointer: coarse) {
+      :root {
+        --frost-soft: none;
+        --frost: none;
+        --frost-strong: none;
+        --panel: rgba(255,255,255,0.95);
+      }
+      :root[data-theme="dark"] {
+        --panel: rgba(22,28,38,0.95);
+      }
     }
     html, body { height: 100%; overflow: hidden; }
     body {
@@ -103,50 +116,92 @@
     .knop:hover { background: var(--accent-soft); }
     .knop.actief { border-color: var(--accent); color: var(--accent); }
 
+    /* Lijnbadge — kleur komt uit de GTFS, dus inline gezet */
+    .lijn-badge {
+      display: inline-block;
+      background: var(--accent); color: #fff;
+      font-family: var(--mono);
+      font-weight: 700; font-size: 12px;
+      padding: 2px 7px; border-radius: 6px;
+      min-width: 30px; text-align: center;
+      letter-spacing: -0.02em;
+    }
+
     /* Bus info popup */
     #bus-info {
       position: absolute;
       display: none;
       padding: 10px 12px;
-      min-width: 180px;
-      font-size: 13px;
+      width: 214px;
+      font-size: 12px;
       z-index: 10;
+      pointer-events: none;
     }
-    #bus-info .lijn-badge {
-      display: inline-block;
-      background: var(--accent);
-      color: #fff;
-      font-weight: 700;
-      padding: 2px 8px;
-      border-radius: 6px;
-      font-size: 14px;
-      margin-bottom: 4px;
+    #bus-info .kop {
+      display: flex; align-items: center; gap: 8px;
+      padding-bottom: 8px; margin-bottom: 6px;
+      border-bottom: 1px solid var(--panel-border);
     }
-    #bus-info .veld { margin-top: 2px; color: var(--muted); }
+    #bus-info .kop .bestemming {
+      font-size: 13px; font-weight: 600;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    #bus-info .veld {
+      display: flex; justify-content: space-between; align-items: baseline;
+      gap: 8px; color: var(--muted); line-height: 1.7;
+    }
     #bus-info .veld strong { color: var(--fg); font-weight: 600; }
+    #bus-info .veld.zacht { font-size: 11px; opacity: 0.75; }
+    #bus-info .veld.volgende {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      grid-template-areas: "kop kop" "naam afstand";
+      margin: 2px 0 6px;
+      padding: 6px 8px;
+      border-radius: 8px;
+      background: var(--accent-soft);
+      font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em;
+    }
+    #bus-info .veld.volgende strong {
+      grid-area: naam;
+      font-size: 12px; text-transform: none; letter-spacing: 0;
+    }
+    #bus-info .veld.volgende span { grid-area: afstand; font-variant-numeric: tabular-nums; }
 
     /* Lijn filter dropdown */
     #lijn-filter {
       position: absolute;
       top: 60px; right: 16px;
-      max-height: 400px;
+      max-height: calc(100vh - 90px);
       overflow-y: auto;
       display: none;
-      padding: 8px;
-      min-width: 200px;
+      padding: 6px;
+      width: 244px;
     }
+    #lijn-filter .filter-kop {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 4px 8px 8px;
+      font-size: 13px; font-weight: 700;
+    }
+    #lijn-filter .filter-reset {
+      border: 0; background: none; cursor: pointer;
+      font-family: var(--font); font-size: 11px; color: var(--accent);
+    }
+    #lijn-filter .filter-reset:disabled { color: var(--muted); cursor: default; }
     #lijn-filter .lijn-item {
       display: flex; align-items: center; gap: 8px;
-      padding: 4px 8px; border-radius: 6px; cursor: pointer;
+      padding: 4px 8px; border-radius: 8px; cursor: pointer;
+      transition: background 0.12s, opacity 0.12s;
     }
     #lijn-filter .lijn-item:hover { background: var(--accent-soft); }
-    #lijn-filter .lijn-item verborgen { opacity: 0.35; }
-    #lijn-filter .lijn-badge {
-      background: var(--accent); color: #fff;
-      font-weight: 700; padding: 1px 6px; border-radius: 4px;
-      font-size: 12px; min-width: 28px; text-align: center;
+    #lijn-filter .lijn-item.verborgen { opacity: 0.32; }
+    #lijn-filter .lijn-naam {
+      flex: 1; font-size: 12px; color: var(--muted);
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     }
-    #lijn-filter .lijn-naam { flex: 1; font-size: 12px; color: var(--muted); }
+    #lijn-filter .lijn-aantal {
+      font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums;
+    }
 
     /* Theme toggle */
     #thema-knop { font-size: 16px; padding: 8px 10px; }
@@ -156,6 +211,41 @@
       position: absolute; bottom: 16px; left: 16px;
       font-size: 11px; color: var(--muted);
     }
+
+    /* Kantelregelaar — hoe schuin we op de stad kijken */
+    #kantel {
+      position: absolute; bottom: 38px; left: 16px;
+      display: flex; align-items: center; gap: 9px;
+      padding: 7px 12px;
+    }
+    #kantel label {
+      font-size: 11px; color: var(--muted);
+      letter-spacing: 0.06em; text-transform: uppercase;
+      cursor: default;
+    }
+    #kantel .hoek {
+      font-family: var(--mono); font-size: 11px; color: var(--fg);
+      min-width: 26px; text-align: right; font-variant-numeric: tabular-nums;
+    }
+    #kantel-slider {
+      -webkit-appearance: none; appearance: none;
+      width: 108px; height: 3px; margin: 0;
+      border-radius: 3px; cursor: pointer;
+      background: var(--panel-border);
+      accent-color: var(--accent);
+    }
+    #kantel-slider::-webkit-slider-thumb {
+      -webkit-appearance: none; appearance: none;
+      width: 13px; height: 13px; border-radius: 50%;
+      background: var(--accent);
+      border: 2px solid var(--panel);
+      box-shadow: 0 1px 3px rgba(20,28,40,0.25);
+    }
+    #kantel-slider::-moz-range-thumb {
+      width: 13px; height: 13px; border: 2px solid var(--panel);
+      border-radius: 50%; background: var(--accent);
+    }
+    #kantel-slider:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
 
     /* Busoverzicht zijbalk (rechts) */
     #busoverzicht {
@@ -186,11 +276,6 @@
       transition: background 0.12s;
     }
     #busoverzicht .lijn-header:hover { background: var(--accent-soft); }
-    #busoverzicht .lijn-header .lijn-badge {
-      background: var(--accent); color: #fff;
-      font-weight: 700; padding: 2px 8px; border-radius: 5px;
-      font-size: 13px; min-width: 32px; text-align: center;
-    }
     #busoverzicht .lijn-header .bestemming {
       flex: 1; font-size: 12px; color: var(--fg);
       white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -217,14 +302,18 @@
     }
     #busoverzicht .bus-item:hover { background: var(--accent-soft); }
     #busoverzicht .bus-item.geselecteerd { background: var(--accent-soft); }
-    #busoverzicht .bus-item .rij { display: flex; justify-content: space-between; color: var(--muted); }
+    #busoverzicht .bus-item .rij {
+      display: flex; justify-content: space-between; gap: 8px; color: var(--muted);
+    }
+    #busoverzicht .bus-item .rij span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     #busoverzicht .bus-item .rij strong { color: var(--fg); font-weight: 600; }
+    #busoverzicht .bus-item .rij.zacht { font-size: 11px; opacity: 0.7; }
     #busoverzicht .bus-item .status-dot {
       display: inline-block; width: 6px; height: 6px; border-radius: 50%;
       margin-right: 4px; vertical-align: middle;
     }
     #busoverzicht .bus-item .status-dot.rijdt { background: #2da44e; }
-    #busoverzicht .bus-item .status-dot.halte { background: #d65a1a; }
+    #busoverzicht .bus-item .status-dot.halte { background: #7fb4d6; }
     #busoverzicht .bus-item .status-dot.aankomend { background: #e8a030; }
   </style>
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -263,10 +352,18 @@
   <!-- Bus info popup -->
   <div id="bus-info" class="panel"></div>
 
+  <!-- Kantelregelaar -->
+  <div id="kantel" class="panel">
+    <label for="kantel-slider">Kanteling</label>
+    <input type="range" id="kantel-slider" min="0.3" max="1" step="0.01"
+           title="Hoe schuin je op de stad kijkt">
+    <span class="hoek" id="kantel-hoek">17°</span>
+  </div>
+
   <!-- Status -->
   <div id="laden"></div>
 
-  <script type="module" src="/js/kaart.js?v=6"></script>
-  <script type="module" src="/js/app.js?v=6"></script>
+  <script type="module" src="/js/kaart.js?v=10"></script>
+  <script type="module" src="/js/app.js?v=10"></script>
 </body>
 </html>

@@ -452,13 +452,16 @@ class BussieHandler(BaseHTTPRequestHandler):
 
                 if history:
                     # Laad 2 laatste posities per voertuig voor vloeiende start
+                    # Alleen voertuigen die in de laatste 5 minuten zijn bijgewerkt
+                    cutoff = int(time.time()) - 300
                     cursor = tdb._trace_db.execute("""
                         SELECT vehicle_id, trip_id, route_id, lijn, richting, bestemming,
                                lat, lon, status, bearing, speed, lbl, timestamp
                         FROM latest_vehicles
                         WHERE lijn IS NOT NULL AND lijn != ''
+                          AND timestamp >= ?
                         ORDER BY lijn
-                    """)
+                    """, (cutoff,))
                     vehicles = []
                     for r in cursor.fetchall():
                         vehicles.append({
@@ -488,13 +491,15 @@ class BussieHandler(BaseHTTPRequestHandler):
                         "historie": prev,
                     }, cache="public, max-age=30")
                 else:
+                    cutoff = int(time.time()) - 300
                     cursor = tdb._trace_db.execute("""
                         SELECT vehicle_id, trip_id, route_id, lijn, richting, bestemming,
                                lat, lon, status, bearing, speed, lbl, timestamp
                         FROM latest_vehicles
                         WHERE lijn IS NOT NULL AND lijn != ''
+                          AND timestamp >= ?
                         ORDER BY lijn
-                    """)
+                    """, (cutoff,))
                     vehicles = []
                     for r in cursor.fetchall():
                         vehicles.append({
@@ -515,9 +520,12 @@ class BussieHandler(BaseHTTPRequestHandler):
 
         # Statische bestanden
         if path == "/" or path == "/index.html":
+            # Niet cachen: de pagina bevat de complete UI en stijlen, dus een
+            # gecachete versie laat wijzigingen tot 10 minuten wegvallen.
             self._send_file(
                 os.path.join(os.path.dirname(__file__), "..", "frontend", "index.html"),
                 "text/html; charset=utf-8",
+                cache="no-cache, must-revalidate",
             )
             return
 
@@ -557,6 +565,14 @@ class BussieHandler(BaseHTTPRequestHandler):
                 self._send_file(map_path, "application/json")
             else:
                 self.send_error(404, "Kaartdata nog niet gegenereerd")
+            return
+
+        if path == "/data/lijnen.json":
+            lijn_path = os.path.join(DATA_DIR, "lijnen.json")
+            if os.path.exists(lijn_path):
+                self._send_file(lijn_path, "application/json")
+            else:
+                self.send_error(404, "Lijnroutes nog niet gegenereerd — draai backend/lijn_routes.py")
             return
 
         self.send_error(404)

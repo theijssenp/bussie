@@ -36,14 +36,15 @@ renderer.setTheme(savedTheme);
 document.getElementById('thema-knop').textContent = savedTheme === 'light' ? '☀' : '☾';
 
 // ---------------------------------------------------------------------------
-// Map data laden
+// Kaart- en lijndata laden
 // ---------------------------------------------------------------------------
 
 bootProgress(10, 'Kaartdata laden…');
 
 let mapData = null;
 let vehicles = [];
-let activeLines = new Map(); // lijn → {bestemming, count}
+let activeLines = new Map();   // lijn → {bestemming, count, kleur}
+let lijnKleuren = new Map();   // lijn → kleur uit de GTFS
 
 async function loadMap() {
   try {
@@ -51,35 +52,39 @@ async function loadMap() {
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     mapData = await resp.json();
     renderer.setMapData(mapData);
-    bootProgress(40, 'Route traces laden…');
-
-    // Laad GPS traces voor snapping (niet voor route-weergave)
-    // De kaart toont altijd de officiële GTFS routes
-    try {
-      const traceResp = await fetch('/api/traces');
-      if (traceResp.ok) {
-        const traces = await traceResp.json();
-        if (Object.keys(traces).length > 0) {
-          renderer.routeTraces = traces;
-          console.log(`${Object.keys(traces).length} lijnen met GPS traces geladen voor snapping`);
-        }
-      }
-    } catch (e) {
-      console.warn('Route traces laden mislukt:', e);
-    }
-
-    bootProgress(50, 'Voertuigen laden…');
+    bootProgress(35, 'Buslijnen laden…');
   } catch (err) {
     bootMsg.textContent = 'Kaartdata niet beschikbaar';
     console.error('Kaartdata laden mislukt:', err);
+    return;
   }
+
+  // Lijnroutes: geometrie, kleuren en haltes per lijn en richting.
+  try {
+    const resp = await fetch('/data/lijnen.json');
+    if (resp.ok) {
+      const data = await resp.json();
+      renderer.setLijnen(data.lijnen || []);
+      for (const r of data.lijnen || []) {
+        if (!lijnKleuren.has(r.lijn)) lijnKleuren.set(r.lijn, r.kleur);
+      }
+      console.log(`${(data.lijnen || []).length} lijnroutes geladen`);
+    }
+  } catch (err) {
+    console.warn('Lijnroutes laden mislukt:', err);
+  }
+
+  bootProgress(55, 'Voertuigen laden…');
+}
+
+function kleurVan(lijn) {
+  return lijnKleuren.get(lijn) || '#8aa0b2';
 }
 
 // ---------------------------------------------------------------------------
 // Realtime polling
 // ---------------------------------------------------------------------------
 
-// Laatst bekende data_ts om buffer-resets te voorkomen
 let lastDataTs = 0;
 
 async function pollVehicles(initial) {
@@ -89,78 +94,35 @@ async function pollVehicles(initial) {
     if (!resp.ok) return;
     const data = await resp.json();
 
-    // Check of data écht veranderd is — voorkomt buffer-reset bij identieke data
+    // Niets veranderd? Dan de bewegingsbuffer met rust laten.
     if (!initial && data.data_ts && data.data_ts === lastDataTs) {
-      // Data niet veranderd — update alleen de klok, niet de buffer
-      document.getElementById('laden').textContent =
-        `${vehicles.length} bussen live · bijgewerkt ${new Date().toLocaleTimeString('nl-NL')}`;
+      updateStatusregel();
       return;
     }
     lastDataTs = data.data_ts || 0;
     vehicles = data.voertuigen || [];
 
-    // Bij initiële load: historische posities gebruiken voor directe buffer
-    const pollTime = Date.now() / 1000;
-    for (const v of vehicles) {
-      v._pollT = pollTime;
-      // Koppel de 1-na-laatste positie voor directe buffer
-      if (initial && data.historie && data.historie[v.id]) {
-        const h = data.historie[v.id];
-        // Zet prev via _prevWx/_prevWy (worden later door updateBuffer gebruikt)
-        v._historyLat = h.lat;
-        v._historyLon = h.lon;
-        v._historyT = h.t;
-      }
-    }
+    renderer.setVehicles(vehicles, initial ? data.historie : null);
 
-    // Eerst posities berekenen (zet _wx/_wy op vehicles)
-    renderer.vehicles = vehicles;
-    renderer.updateVehiclePositions();
-
-    // Bij initiële load: buffer direct vullen met prev uit historie
-    if (initial) {
-      for (const v of vehicles) {
-        if (v._historyLat !== undefined && v._historyLon !== undefined && v._wx !== undefined) {
-          const center = renderer.mapData?.center;
-          if (center) {
-            const R = 6378137, n = Math.PI / 180, cosLat = Math.cos(center.lat * n);
-            const hx = (v._historyLon - center.lon) * n * R * cosLat;
-            const hy = -(v._historyLat - center.lat) * n * R;
-            // Zet direct een buffer entry met prev én cur
-            const buf = renderer._vehicleBuffer;
-            if (buf) {
-              buf.set(v.id, {
-                prev: { x: hx, y: hy, t: v._historyT },
-                cur: { x: v._wx, y: v._wy, t: pollTime },
-                interpStart: pollTime,
-              });
-            }
-          }
-        }
-      }
-    }
-
-    // Daarna buffer updaten met de berekende posities
-    renderer.updateBuffer();
-
-    // Update lijnfilter
     activeLines.clear();
     for (const v of vehicles) {
       const lijn = v.lijn || '?';
       if (!activeLines.has(lijn)) {
-        activeLines.set(lijn, { bestemming: v.bestemming || '', count: 0 });
+        activeLines.set(lijn, { bestemming: v.bestemming || '', count: 0, kleur: kleurVan(lijn) });
       }
       activeLines.get(lijn).count++;
     }
     updateLijnFilter();
     updateBusoverzicht();
-
-    // Status
-    document.getElementById('laden').textContent =
-      `${vehicles.length} bussen live · bijgewerkt ${new Date().toLocaleTimeString('nl-NL')}`;
+    updateStatusregel();
   } catch (err) {
     console.error('Pollen mislukt:', err);
   }
+}
+
+function updateStatusregel() {
+  document.getElementById('laden').textContent =
+    `${vehicles.length} bussen live · bijgewerkt ${new Date().toLocaleTimeString('nl-NL')}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -169,6 +131,7 @@ async function pollVehicles(initial) {
 
 function renderLoop() {
   renderer.render();
+  if (renderer.hoveredVehicle) volgPopup(renderer.hoveredVehicle);
   requestAnimationFrame(renderLoop);
 }
 
@@ -178,8 +141,8 @@ function renderLoop() {
 
 function updateKlok() {
   const now = new Date();
-  const t = now.toLocaleTimeString('nl-NL', { hour: '2-digit', minute: '2-digit' });
-  document.getElementById('klok').textContent = t;
+  document.getElementById('klok').textContent =
+    now.toLocaleTimeString('nl-NL', { hour: '2-digit', minute: '2-digit' });
 }
 
 // ---------------------------------------------------------------------------
@@ -190,37 +153,47 @@ const lijnFilterDiv = document.getElementById('lijn-filter');
 const lijnenKnop = document.getElementById('lijnen-knop');
 let lijnFilterOpen = false;
 
-function updateLijnFilter() {
-  const lijnen = [...activeLines.entries()].sort((a, b) => {
-    // Sorteer numeriek waar mogelijk
-    const an = parseInt(a[0]);
-    const bn = parseInt(b[0]);
+function gesorteerdeLijnen(entries) {
+  return [...entries].sort((a, b) => {
+    const an = parseInt(a[0]), bn = parseInt(b[0]);
     if (!isNaN(an) && !isNaN(bn)) return an - bn;
     return a[0].localeCompare(b[0]);
   });
+}
 
-  lijnFilterDiv.innerHTML = lijnen.map(([lijn, info]) => {
-    const verborgen = renderer.filteredLines.size > 0 && !renderer.filteredLines.has(lijn);
-    return `<div class="lijn-item ${verborgen ? 'verborgen' : ''}" data-lijn="${lijn}">
-      <span class="lijn-badge">${lijn}</span>
-      <span class="lijn-naam">${info.bestemming} (${info.count})</span>
+function updateLijnFilter() {
+  const lijnen = gesorteerdeLijnen(activeLines.entries());
+  const gefilterd = renderer.filteredLines.size > 0;
+
+  let html = `<div class="filter-kop">
+      <span>Lijnen</span>
+      <button class="filter-reset" ${gefilterd ? '' : 'disabled'}>alles tonen</button>
+    </div>`;
+
+  html += lijnen.map(([lijn, info]) => {
+    const uit = gefilterd && !renderer.filteredLines.has(lijn);
+    return `<div class="lijn-item${uit ? ' verborgen' : ''}" data-lijn="${lijn}">
+      <span class="lijn-badge" style="background:${info.kleur};color:${tekstKleur(info.kleur)}">${lijn}</span>
+      <span class="lijn-naam">${info.bestemming}</span>
+      <span class="lijn-aantal">${info.count}</span>
     </div>`;
   }).join('');
 
-  // Click handlers
+  lijnFilterDiv.innerHTML = html;
+
+  lijnFilterDiv.querySelector('.filter-reset')?.addEventListener('click', () => {
+    renderer.filteredLines.clear();
+    updateLijnFilter();
+  });
+
   lijnFilterDiv.querySelectorAll('.lijn-item').forEach(item => {
     item.addEventListener('click', () => {
       const lijn = item.dataset.lijn;
-      if (renderer.filteredLines.has(lijn)) {
-        renderer.filteredLines.delete(lijn);
-      } else {
-        renderer.filteredLines.add(lijn);
-      }
-      // Als alles uit staat → reset (toon alles)
-      if (renderer.filteredLines.size === activeLines.size) {
-        renderer.filteredLines.clear();
-      }
+      if (renderer.filteredLines.has(lijn)) renderer.filteredLines.delete(lijn);
+      else renderer.filteredLines.add(lijn);
+      if (renderer.filteredLines.size === activeLines.size) renderer.filteredLines.clear();
       updateLijnFilter();
+      updateBusoverzicht();
     });
   });
 }
@@ -229,12 +202,7 @@ lijnenKnop.addEventListener('click', () => {
   lijnFilterOpen = !lijnFilterOpen;
   lijnFilterDiv.style.display = lijnFilterOpen ? 'block' : 'none';
   lijnenKnop.classList.toggle('actief', lijnFilterOpen);
-  // Sluit busoverzicht als we lijnfilter openen
-  if (lijnFilterOpen) {
-    overzichtOpen = false;
-    busoverzichtDiv.style.display = 'none';
-    overzichtKnop.classList.remove('actief');
-  }
+  if (lijnFilterOpen) sluitOverzicht();
 });
 
 // ---------------------------------------------------------------------------
@@ -244,69 +212,85 @@ lijnenKnop.addEventListener('click', () => {
 const busoverzichtDiv = document.getElementById('busoverzicht');
 const overzichtKnop = document.getElementById('overzicht-knop');
 let overzichtOpen = false;
-let ingeklapteLijnen = new Set(); // welke lijn-groepen zijn ingeklapt
+let ingeklapteLijnen = new Set();
 
-function statusTekst(v) {
+function statusVan(v) {
+  const snelheid = renderer.snelheidVan(v);
+  if (snelheid !== null && snelheid < 0.6) return { tekst: 'stilstaand', cls: 'halte' };
   if (v.st === 1) return { tekst: 'bij halte', cls: 'halte' };
   if (v.st === 0) return { tekst: 'aankomend', cls: 'aankomend' };
   return { tekst: 'rijdt', cls: 'rijdt' };
 }
 
 function snelheidTekst(v) {
-  const speedMs = v._calcSpeed !== undefined ? v._calcSpeed : v.snelheid;
-  if (speedMs !== null && speedMs !== undefined) {
-    return `${Math.round(speedMs * 3.6)} km/u`;
-  }
-  return '—';
+  const snelheid = renderer.snelheidVan(v);
+  const ms = snelheid !== null ? snelheid : v.snelheid;
+  if (ms === null || ms === undefined) return '—';
+  return `${Math.round(ms * 3.6)} km/u`;
+}
+
+function volgendeHalteVan(v) {
+  const route = v._route;
+  if (!route || v._d === null || v._d === undefined) return null;
+  return renderer.volgendeHalte(route, v._d);
+}
+
+function halteTekst(v) {
+  const volgende = volgendeHalteVan(v);
+  if (!volgende) return null;
+  const meter = volgende.afstand;
+  const afstand = meter > 950 ? `${(meter / 1000).toFixed(1)} km` : `${Math.round(meter / 10) * 10} m`;
+  return { naam: volgende.halte.naam.replace(/^Groningen, /, ''), afstand };
+}
+
+function sluitOverzicht() {
+  overzichtOpen = false;
+  busoverzichtDiv.style.display = 'none';
+  overzichtKnop.classList.remove('actief');
 }
 
 function updateBusoverzicht() {
-  if (!vehicles || vehicles.length === 0) {
+  if (!vehicles.length) {
     busoverzichtDiv.innerHTML = '<div class="header">Geen bussen</div>';
     return;
   }
 
-  // Groepeer bussen per lijn
   const perLijn = new Map();
   for (const v of vehicles) {
+    if (!renderer.zichtbaar(v.lijn)) continue;
     const lijn = v.lijn || '?';
-    if (!perLijn.has(lijn)) {
-      perLijn.set(lijn, { bestemming: v.bestemming || '', bussen: [] });
-    }
+    if (!perLijn.has(lijn)) perLijn.set(lijn, { bestemming: v.bestemming || '', bussen: [] });
     perLijn.get(lijn).bussen.push(v);
   }
 
-  // Sorteer lijnen numeriek
-  const lijnen = [...perLijn.entries()].sort((a, b) => {
-    const an = parseInt(a[0]);
-    const bn = parseInt(b[0]);
-    if (!isNaN(an) && !isNaN(bn)) return an - bn;
-    return a[0].localeCompare(b[0]);
-  });
+  const lijnen = gesorteerdeLijnen(perLijn.entries());
+  const totaal = lijnen.reduce((n, [, info]) => n + info.bussen.length, 0);
 
-  // Bouw HTML
-  let html = `<div class="header">Busoverzicht <span class="aantal">${vehicles.length} bussen · ${lijnen.length} lijnen</span></div>`;
+  let html = `<div class="header">Bussen <span class="aantal">${totaal} · ${lijnen.length} lijnen</span></div>`;
 
   for (const [lijn, info] of lijnen) {
+    const kleur = kleurVan(lijn);
     const ingeklapt = ingeklapteLijnen.has(lijn);
-    const maxH = info.bussen.length * 60;
 
     html += `<div class="lijn-groep${ingeklapt ? ' ingeklapt' : ''}" data-lijn="${lijn}">`;
     html += `<div class="lijn-header" data-lijn="${lijn}">`;
-    html += `<span class="lijn-badge">${lijn}</span>`;
+    html += `<span class="lijn-badge" style="background:${kleur};color:${tekstKleur(kleur)}">${lijn}</span>`;
     html += `<span class="bestemming">${info.bestemming}</span>`;
-    html += `<span class="count">${info.bussen.length}x</span>`;
+    html += `<span class="count">${info.bussen.length}×</span>`;
     html += `<span class="chevron">▼</span>`;
     html += `</div>`;
-    html += `<div class="bus-lijst" style="max-height:${maxH}px">`;
+    html += `<div class="bus-lijst" style="max-height:${info.bussen.length * 62}px">`;
 
     for (const v of info.bussen) {
-      const st = statusTekst(v);
-      const sel = renderer.hoveredVehicle && renderer.hoveredVehicle.id === v.id ? ' geselecteerd' : '';
+      const st = statusVan(v);
+      const halte = halteTekst(v);
+      const sel = renderer.hoveredVehicle?.id === v.id ? ' geselecteerd' : '';
       html += `<div class="bus-item${sel}" data-vid="${v.id}">`;
       html += `<div class="rij"><span><span class="status-dot ${st.cls}"></span><strong>${st.tekst}</strong></span><span>${snelheidTekst(v)}</span></div>`;
-      html += `<div class="rij"><span>Voertuig ${v.lbl || '—'}</span><span>${v.bestemming || '—'}</span></div>`;
-      html += `<div class="rij"><span>Bijgewerkt ${new Date(v.t * 1000).toLocaleTimeString('nl-NL')}</span></div>`;
+      html += halte
+        ? `<div class="rij"><span>→ ${halte.naam}</span><span>${halte.afstand}</span></div>`
+        : `<div class="rij"><span>${v.bestemming || '—'}</span></div>`;
+      html += `<div class="rij zacht"><span>Bus ${v.lbl || '—'}</span><span>${new Date(v.t * 1000).toLocaleTimeString('nl-NL')}</span></div>`;
       html += `</div>`;
     }
 
@@ -315,29 +299,25 @@ function updateBusoverzicht() {
 
   busoverzichtDiv.innerHTML = html;
 
-  // Click handlers voor lijn headers (uitklappen/inklappen)
   busoverzichtDiv.querySelectorAll('.lijn-header').forEach(h => {
     h.addEventListener('click', () => {
       const lijn = h.dataset.lijn;
-      if (ingeklapteLijnen.has(lijn)) {
-        ingeklapteLijnen.delete(lijn);
-      } else {
-        ingeklapteLijnen.add(lijn);
-      }
+      if (ingeklapteLijnen.has(lijn)) ingeklapteLijnen.delete(lijn);
+      else ingeklapteLijnen.add(lijn);
       updateBusoverzicht();
     });
   });
 
-  // Click handlers voor bus items (centreer kaart op bus)
   busoverzichtDiv.querySelectorAll('.bus-item').forEach(item => {
     item.addEventListener('click', () => {
-      const vid = item.dataset.vid;
-      const v = vehicles.find(v => v.id === vid);
-      if (v && v._wx !== undefined) {
-        renderer.setCenter(v._wx, v._wy, Math.max(renderer.cam.zoom, 2.5));
-        renderer.hoveredVehicle = v;
-        renderer.onHoverChange?.(v);
-      }
+      const v = vehicles.find(v => v.id === item.dataset.vid);
+      if (!v) return;
+      const x = v._dispWx !== undefined ? v._dispWx : v._wx;
+      const y = v._dispWy !== undefined ? v._dispWy : v._wy;
+      if (x === undefined) return;
+      renderer.setCenter(x, y, Math.max(renderer.cam.zoom, 2.5));
+      renderer.hoveredVehicle = v;
+      renderer.onHoverChange?.(v);
     });
   });
 }
@@ -346,11 +326,11 @@ overzichtKnop.addEventListener('click', () => {
   overzichtOpen = !overzichtOpen;
   busoverzichtDiv.style.display = overzichtOpen ? 'block' : 'none';
   overzichtKnop.classList.toggle('actief', overzichtOpen);
-  // Sluit lijnfilter als we overzicht openen
   if (overzichtOpen) {
     lijnFilterOpen = false;
     lijnFilterDiv.style.display = 'none';
     lijnenKnop.classList.remove('actief');
+    updateBusoverzicht();
   }
 });
 
@@ -366,35 +346,47 @@ renderer.onHoverChange = (v) => {
     return;
   }
 
-  const speedMs = v._calcSpeed !== undefined ? v._calcSpeed : v.snelheid;
-  const snelheidTekst = speedMs !== null && speedMs !== undefined
-    ? `${Math.round(speedMs * 3.6)} km/u`
-    : '—';
-  const bearingVal = v._calcBearing !== undefined ? v._calcBearing : v.bearing;
-  const richtingTekst = bearingVal !== null && bearingVal !== undefined
-    ? `${bearingVal}°`
-    : '—';
-  // Status via buffer (0=stilstaand, 2=onderweg, zoals buffer berekent)
-  const statusTekst = speedMs > 1 ? 'onderweg' : 'bij halte';
+  const kleur = kleurVan(v.lijn);
+  const st = statusVan(v);
+  const halte = halteTekst(v);
+  const bestemming = (v.bestemming || 'Onbekend').replace(/^Groningen, /, '');
 
   busInfoDiv.innerHTML = `
-    <div class="lijn-badge">Lijn ${v.lijn || '?'}</div>
-    <div class="veld"><strong>${v.bestemming || 'Onbekend'}</strong></div>
-    <div class="veld">Status: ${statusTekst}</div>
-    <div class="veld">Snelheid: ${snelheidTekst}</div>
-    <div class="veld">Richting: ${richtingTekst}</div>
-    <div class="veld">Voertuig: ${v.lbl || v.id}</div>
-    <div class="veld">Bijgewerkt: ${new Date(v.t * 1000).toLocaleTimeString('nl-NL')}</div>
+    <div class="kop">
+      <span class="lijn-badge" style="background:${kleur};color:${tekstKleur(kleur)}">${v.lijn || '?'}</span>
+      <span class="bestemming">${bestemming}</span>
+    </div>
+    ${halte ? `<div class="veld volgende">Volgende halte<strong>${halte.naam}</strong><span>${halte.afstand}</span></div>` : ''}
+    <div class="veld"><span>Status</span><strong>${st.tekst}</strong></div>
+    <div class="veld"><span>Snelheid</span><strong>${snelheidTekst(v)}</strong></div>
+    <div class="veld"><span>Voertuig</span><strong>${v.lbl || '—'}</strong></div>
+    <div class="veld zacht"><span>Bijgewerkt</span><span>${new Date(v.t * 1000).toLocaleTimeString('nl-NL')}</span></div>
   `;
-
-  // Positie popup op basis van getoonde buspositie (_dispWx = interpolatie + snapping)
-  if (v._dispWx !== undefined && v._dispWy !== undefined) {
-    const p = renderer.worldToScreen(v._dispWx, v._dispWy);
-    busInfoDiv.style.left = Math.min(p.x + 15, window.innerWidth - 220) + 'px';
-    busInfoDiv.style.top = Math.max(p.y - 60, 16) + 'px';
-    busInfoDiv.style.display = 'block';
-  }
+  busInfoDiv.style.display = 'block';
+  volgPopup(v);
 };
+
+/** De popup blijft aan de bus hangen terwijl die doorrijdt. */
+function volgPopup(v) {
+  if (busInfoDiv.style.display === 'none') return;
+  const x = v._sx, y = v._sy;
+  if (x === undefined) return;
+  const breedte = busInfoDiv.offsetWidth || 210;
+  const hoogte = busInfoDiv.offsetHeight || 120;
+  busInfoDiv.style.left = Math.max(8, Math.min(x + 18, window.innerWidth - breedte - 8)) + 'px';
+  busInfoDiv.style.top = Math.max(8, Math.min(y - hoogte - 14, window.innerHeight - hoogte - 8)) + 'px';
+}
+
+// ---------------------------------------------------------------------------
+// Kleurhulpje — donkere of lichte tekst op een gekleurd badge
+// ---------------------------------------------------------------------------
+
+function tekstKleur(hex) {
+  const h = hex.replace('#', '');
+  const n = parseInt(h, 16);
+  const r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
+  return (r * 0.299 + g * 0.587 + b * 0.114) > 150 ? '#2b3038' : '#ffffff';
+}
 
 // ---------------------------------------------------------------------------
 // Theme toggle
@@ -407,26 +399,40 @@ document.getElementById('thema-knop').addEventListener('click', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Kantelregelaar
+// ---------------------------------------------------------------------------
+
+const kantelSlider = document.getElementById('kantel-slider');
+const kantelHoek = document.getElementById('kantel-hoek');
+
+/** De indrukfactor is de sinus van de kijkhoek — die tonen we in graden. */
+function toonHoek(tilt) {
+  kantelHoek.textContent = `${Math.round(Math.asin(tilt) * 180 / Math.PI)}°`;
+}
+
+kantelSlider.value = renderer.tilt;
+toonHoek(renderer.tilt);
+
+kantelSlider.addEventListener('input', () => {
+  const tilt = parseFloat(kantelSlider.value);
+  renderer.setTilt(tilt);
+  toonHoek(renderer.tilt);
+});
+
+// ---------------------------------------------------------------------------
 // Geolocatie
 // ---------------------------------------------------------------------------
 
 document.getElementById('locatie-knop').addEventListener('click', () => {
-  if (!navigator.geolocation) return;
+  if (!navigator.geolocation || !mapData) return;
   navigator.geolocation.getCurrentPosition((pos) => {
-    const lat = pos.coords.latitude;
-    const lon = pos.coords.longitude;
-    if (!mapData) return;
-
-    // Converteer naar world meters
     const center = mapData.center;
-    const latM = 111320.0;
-    const lonM = 111320.0 * Math.cos(center.lat * Math.PI / 180);
-    const wx = (lon - center.lon) * lonM;
-    const wy = -(lat - center.lat) * latM;
-
-    renderer.setCenter(wx, wy, Math.max(renderer.cam.zoom, 1.5));
+    const R = 6378137, n = Math.PI / 180, cosLat = Math.cos(center.lat * n);
+    const wx = (pos.coords.longitude - center.lon) * n * R * cosLat;
+    const wy = -(pos.coords.latitude - center.lat) * n * R;
+    renderer.setCenter(wx, wy, Math.max(renderer.cam.zoom, 2));
   }, (err) => {
-    console.warning('Geolocatie niet beschikbaar:', err);
+    console.warn('Geolocatie niet beschikbaar:', err);
   });
 });
 
@@ -440,7 +446,6 @@ window.addEventListener('resize', () => renderer.resize());
 // Start
 // ---------------------------------------------------------------------------
 
-// Expose for debugging
 window.__renderer = renderer;
 
 async function start() {
@@ -448,16 +453,16 @@ async function start() {
   setInterval(updateKlok, 1000);
 
   await loadMap();
-  bootProgress(55, 'Realtime data ophalen…');
+  bootProgress(70, 'Realtime data ophalen…');
 
   await pollVehicles(true);
-  bootProgress(90, 'Klaar…');
+  bootProgress(95, 'Klaar…');
 
-  // Start render loop
   renderLoop();
-
-  // Start polling (elke 20 seconden — eigen datalaag, geen externe API load)
   setInterval(() => pollVehicles(), 20000);
+
+  // De zijbalk toont afstanden tot de volgende halte — die lopen mee.
+  setInterval(() => { if (overzichtOpen) updateBusoverzicht(); }, 5000);
 
   hideBoot();
 }
