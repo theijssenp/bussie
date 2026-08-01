@@ -353,8 +353,12 @@ const DRUKTE_CEL = 600;   // meter; het raster waarin we bussen tellen
 
 /**
  * De drukste plek binnen een plaats: het rastervak met de meeste bussen,
- * plus zijn buren, en daarvan het zwaartepunt. Zonder bussen in de buurt
- * (nacht, klein dorp) valt het terug op het midden van de plaats zelf.
+ * plus zijn buren, en daarvan het zwaartepunt.
+ *
+ * Een cluster ver van het centrum weegt lichter dan eentje er middenin —
+ * anders kiest een stad als Delft een groepje bussen dat eigenlijk bij de
+ * buurstad hoort. Is er maar één bus dichtbij, dan is dat nog altijd een
+ * betere plek om te landen dan het geometrische middelpunt.
  */
 function druksteplek(plaats) {
   const straal = ZOEKSTRAAL[plaats.soort] || 5000;
@@ -363,10 +367,13 @@ function druksteplek(plaats) {
     const x = v._dispWx !== undefined ? v._dispWx : v._wx;
     const y = v._dispWy !== undefined ? v._dispWy : v._wy;
     if (x === undefined) continue;
-    if (Math.abs(x - plaats.x) > straal || Math.abs(y - plaats.y) > straal) continue;
-    dichtbij.push({ x, y });
+    // Ronde straal, geen vierkant: in een hoek zit je anders anderhalf keer
+    // zo ver weg als bedoeld.
+    const afstand = Math.hypot(x - plaats.x, y - plaats.y);
+    if (afstand > straal) continue;
+    dichtbij.push({ x, y, afstand });
   }
-  if (dichtbij.length < 2) return null;
+  if (!dichtbij.length) return null;
 
   const vakken = new Map();
   for (const p of dichtbij) {
@@ -376,8 +383,8 @@ function druksteplek(plaats) {
     else vakken.set(sleutel, [p]);
   }
 
-  let beste = null, besteAantal = 0;
-  for (const [sleutel, punten] of vakken) {
+  let beste = null, besteScore = 0;
+  for (const sleutel of vakken.keys()) {
     const [cx, cy] = sleutel.split(',').map(Number);
     // Buren meetellen, anders wint een toevallige celgrens
     let aantal = 0, sx = 0, sy = 0;
@@ -390,12 +397,19 @@ function druksteplek(plaats) {
         }
       }
     }
-    if (aantal > besteAantal) {
-      besteAantal = aantal;
-      beste = { x: sx / aantal, y: sy / aantal, aantal };
+    const x = sx / aantal, y = sy / aantal;
+    // Hoe verder van het centrum, hoe meer bussen er nodig zijn om te winnen
+    const afstand = Math.hypot(x - plaats.x, y - plaats.y);
+    const score = aantal * Math.exp(-afstand / (straal * 0.45));
+    if (score > besteScore) {
+      besteScore = score;
+      beste = { x, y, aantal, afstand };
     }
   }
-  return besteAantal >= 2 ? beste : null;
+
+  // Een enkele bus in de verte zegt niets; dichtbij is het wel het kijken waard
+  if (!beste || (beste.aantal < 2 && beste.afstand > straal * 0.4)) return null;
+  return beste;
 }
 
 function gaNaar(plaats) {
