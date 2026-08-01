@@ -18,7 +18,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 
 from google.transit import gtfs_realtime_pb2
-from trace_db import get_db, store_positions, generate_route_traces, get_all_traces, get_trace_stats
+from trace_db import get_db, store_positions, generate_route_traces, get_all_traces, get_trace_stats, ruim_op
 
 # ---------------------------------------------------------------------------
 # Config
@@ -29,17 +29,22 @@ FEED_URL = "https://gtfs.ovapi.nl/nl/vehiclePositions.pb"
 GTFS_ZIP_URL = "https://gtfs.ovapi.nl/nl/gtfs-nl.zip"
 USER_AGENT = "bussie.hodc.nl/0.1 (herm@theijssen.nl)"
 
-# Stad → operator + gebiedsfilter (bounding box lat/lon)
-# Operators per stad gebaseerd op gtfs.ovapi.nl directory structuur
+# Gebied → gebiedsfilter (bounding box lat/lon) en vervoerders.
+# Een lege operatorlijst betekent: alle vervoerders in de feed.
 CITIES = {
+    "nederland": {
+        "operators": [],
+        "bbox": [50.70, 3.30, 53.60, 7.30],
+        "center": [5.4, 52.15],
+    },
+    # Alleen Groningen kijken kan nog via ?stad=groningen
     "groningen": {
         "operators": ["QBUZZ"],
-        # Bounding box Groningen centrum + omgeving
-        # MOET overeenkomen met kaart_generator.py CENTER
         "bbox": [53.18, 6.50, 53.28, 6.62],
         "center": [6.563, 53.2265],
     },
 }
+STANDAARD_GEBIED = "nederland"
 
 # Cache voor statische GTFS data: route_id → {short_name, long_name, type}
 ROUTE_CACHE = {}  # route_id → {short_name, long_name, route_type}
@@ -171,7 +176,7 @@ def filter_vehicles(feed, city):
     if not cfg or not feed:
         return []
 
-    operators = set(cfg["operators"])
+    operators = set(cfg["operators"])  # leeg = geen filter
     bbox = cfg["bbox"]  # [min_lat, min_lon, max_lat, max_lon]
     min_lat, min_lon, max_lat, max_lon = bbox
 
@@ -187,7 +192,7 @@ def filter_vehicles(feed, city):
         if len(parts) < 2:
             continue
         operator = parts[1]
-        if operator not in operators:
+        if operators and operator not in operators:
             continue
 
         # Bounding box filter
@@ -292,15 +297,23 @@ def poll_loop():
     """Continu realtime data ophalen, elke 30 seconden.
     Slaat posities op in SQLite voor route-reconstructie."""
     global _trace_db, _last_feed_ts
-    log.info("Realtime poll loop gestart (interval: 30s)")
+    log.info("Realtime poll loop gestart (interval: 20s)")
     _trace_db = get_db()
+    rondes = 0
     while True:
+        rondes += 1
+        # Ongeveer één keer per uur de oude posities opruimen
+        if rondes % 180 == 1:
+            try:
+                ruim_op(_trace_db)
+            except Exception as e:
+                log.warning("Opruimen mislukt: %s", e)
         feed = fetch_realtime()
         if feed:
             _last_feed_ts = feed.header.timestamp
             with REALTIME_LOCK:
                 all_vehicles = []
-                for city in CITIES:
+                for city in (STANDAARD_GEBIED,):
                     vehicles = filter_vehicles(feed, city)
                     REALTIME_CACHE[city] = {
                         "v": 1,
@@ -340,16 +353,30 @@ class BussieHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _send_file(self, path, content_type, cache="public, max-age=600"):
+    def _wil_gzip(self):
+        return "gzip" in self.headers.get("Accept-Encoding", "")
+
+    def _send_file(self, path, content_type, cache="public, max-age=600", gzip_ok=True):
         if not os.path.exists(path):
             self.send_error(404)
             return
         with open(path, "rb") as f:
             body = f.read()
+
+        # Kaartdata is coördinaten; die comprimeren met een factor 4.
+        gezipt = False
+        if gzip_ok and len(body) > 1024 and self._wil_gzip():
+            import gzip as _gzip
+            body = _gzip.compress(body, 6)
+            gezipt = True
+
         self.send_response(200)
         self.send_header("Content-Type", content_type)
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Cache-Control", cache)
+        if gezipt:
+            self.send_header("Content-Encoding", "gzip")
+            self.send_header("Vary", "Accept-Encoding")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -362,7 +389,9 @@ class BussieHandler(BaseHTTPRequestHandler):
             # Support /api/voertuigen?stad=groningen
             from urllib.parse import urlparse, parse_qs
             qs = parse_qs(urlparse(self.path).query)
-            city = qs.get("stad", ["groningen"])[0]
+            city = qs.get("stad", [STANDAARD_GEBIED])[0]
+            if city not in CITIES:
+                city = STANDAARD_GEBIED
             with REALTIME_LOCK:
                 data = REALTIME_CACHE.get(city, {"v": 1, "ts": 0, "voertuigen": []})
             self._send_json(data)
@@ -389,7 +418,9 @@ class BussieHandler(BaseHTTPRequestHandler):
             # Alle lijnnummers voor een stad met route info
             from urllib.parse import urlparse, parse_qs
             qs = parse_qs(urlparse(self.path).query)
-            city = qs.get("stad", ["groningen"])[0]
+            city = qs.get("stad", [STANDAARD_GEBIED])[0]
+            if city not in CITIES:
+                city = STANDAARD_GEBIED
             with REALTIME_LOCK:
                 data = REALTIME_CACHE.get(city, {})
             vehicles = data.get("voertuigen", [])
@@ -440,7 +471,9 @@ class BussieHandler(BaseHTTPRequestHandler):
             # Onafhankelijk van de in-memory cache — blijft werken na restart
             from urllib.parse import urlparse, parse_qs
             qs = parse_qs(urlparse(self.path).query)
-            city = qs.get("stad", ["groningen"])[0]
+            city = qs.get("stad", [STANDAARD_GEBIED])[0]
+            if city not in CITIES:
+                city = STANDAARD_GEBIED
             history = qs.get("history", ["0"])[0] == "2"
             import trace_db as tdb
             if tdb._trace_db:
@@ -565,6 +598,29 @@ class BussieHandler(BaseHTTPRequestHandler):
                 self._send_file(map_path, "application/json")
             else:
                 self.send_error(404, "Kaartdata nog niet gegenereerd")
+            return
+
+        if path.startswith("/data/tegels/"):
+            # Tegels zijn onveranderlijk zolang de generator niet opnieuw
+            # draait, dus die mogen lang in de browsercache blijven.
+            rel = path[len("/data/tegels/"):]
+            if ".." in rel or rel.startswith("/"):
+                self.send_error(400)
+                return
+            tegel_pad = os.path.join(DATA_DIR, "tegels", rel)
+            if rel.endswith(".json") or rel.endswith(".lbl"):
+                # De index wijst naar de rest en verandert bij elke herbouw
+                self._send_file(tegel_pad, "application/json",
+                                cache="no-cache, must-revalidate")
+            else:
+                # Tegels dragen een bouwstempel in de URL, dus die mogen blijven
+                self._send_file(tegel_pad, "application/octet-stream",
+                                cache="public, max-age=604800, immutable")
+            return
+
+        if path == "/data/steden.json":
+            self._send_file(os.path.join(DATA_DIR, "steden.json"), "application/json",
+                            cache="public, max-age=3600")
             return
 
         if path == "/data/lijnen.json":

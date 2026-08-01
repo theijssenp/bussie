@@ -22,7 +22,6 @@ export class IsoRenderer {
     this.targetCam = { x: 0, y: 0, zoom: 1, rotation: 0 };
 
     // Map data
-    this.mapData = null;
     this.lijnen = [];           // lijnroutes uit lijnen.json
     this.lijnIndex = new Map(); // route_id|richting → lijnroute
     this.haltes = [];           // unieke haltes van alle lijnen
@@ -266,42 +265,21 @@ export class IsoRenderer {
 
   // === Data ===
 
-  setMapData(data) {
-    this.mapData = data;
-    if (!data) return;
-
-    // Eén keer een bounding box per element: het schelen van punt-voor-punt
-    // controleren per frame is het verschil tussen 20 en 60 fps.
-    for (const laag of ['streets', 'buildings', 'water', 'green']) {
-      for (const el of data[laag] || []) {
-        el._b = boundsVan(el.pts);
-      }
-    }
-
-    // Gebouwen van achter naar voren zetten. Nu we schuiner kijken steken
-    // gevels boven hun buren uit, en dan moet het achterste er eerst staan.
-    // Meteen ook de tint vastleggen: die volgt uit de eigen coördinaten,
-    // dus hij ligt vast en flikkert niet tijdens het pannen.
-    if (data.buildings) {
-      const tinten = GEVEL_TINTEN.length;
-      for (const el of data.buildings) {
-        el._diep = el._b ? el._b.maxX + el._b.maxY : 0;
-        const b = el._b;
-        const grootte = b ? Math.max(b.maxX - b.minX, b.maxY - b.minY) : 0;
-        const formaat = grootte < 14 ? 0 : grootte < 34 ? 1 : 2;
-        const ruis = b ? hashPositie(b.minX, b.minY) : 0;
-        el._tint = formaat * tinten + Math.min(tinten - 1, (ruis * tinten) | 0);
-      }
-      data.buildings.sort((a, b) => a._diep - b._diep);
-    }
-
-    if (data.center) {
-      this.cam.x = this.cam.y = 0;
-      this.targetCam.x = this.targetCam.y = 0;
-      // Schuiner kijken betekent meer in beeld, dus starten we iets dichterbij
+  /**
+   * De tegelbron levert de kaartondergrond. De renderer vraagt per frame
+   * welke tegels in beeld zijn; laden gebeurt op de achtergrond.
+   */
+  setTegelBron(bron) {
+    this.tegelBron = bron;
+    this.center = bron.center;
+    const start = bron.index?.start;
+    if (start) {
+      this.cam.x = this.targetCam.x = start.x;
+      this.cam.y = this.targetCam.y = start.y;
       this.cam.zoom = this.targetCam.zoom = 1.1;
     }
   }
+
 
   /** Lijnroutes met kleur, cumulatieve afstand en haltes. */
   setLijnen(lijnen) {
@@ -334,18 +312,13 @@ export class IsoRenderer {
     this.haltes = [...perHalte.values()];
   }
 
-  /** Knip een polyline op de kaartrand (bbox van de OSM-data). */
+  /** Knip een polyline op de rand van het gebied waar we tegels van hebben. */
   knipOpKaart(pts) {
-    const bbox = this.mapData?.bbox;
-    if (!bbox) return [pts];
-    // bbox = [min_lat, min_lon, max_lat, max_lon] → in wereldmeters
-    const c = this.mapData.center;
-    const R = 6378137, n = Math.PI / 180, cosLat = Math.cos(c.lat * n);
-    const marge = 400;
-    const minX = (bbox[1] - c.lon) * n * R * cosLat - marge;
-    const maxX = (bbox[3] - c.lon) * n * R * cosLat + marge;
-    const minY = -(bbox[2] - c.lat) * n * R - marge;
-    const maxY = -(bbox[0] - c.lat) * n * R + marge;
+    const bereik = this.tegelBron?.index?.bereik;
+    if (!bereik) return [{ pts, b: boundsVan(pts) }];
+    const marge = 600;
+    const minX = bereik.minX - marge, maxX = bereik.maxX + marge;
+    const minY = bereik.minY - marge, maxY = bereik.maxY + marge;
 
     const segmenten = [];
     let huidig = null;
@@ -381,7 +354,7 @@ export class IsoRenderer {
    */
   setVehicles(vehicles, historie) {
     this.vehicles = vehicles || [];
-    const center = this.mapData?.center;
+    const center = this.center;
     if (!center) return;
 
     const R = 6378137, n = Math.PI / 180, cosLat = Math.cos(center.lat * n);
@@ -572,48 +545,244 @@ export class IsoRenderer {
   // === Rendering ===
 
   render() {
-    if (!this.mapData) return;
+    if (!this.tegelBron) return;
 
     const ctx = this.ctx;
     const c = this.colors;
-    const z = this.cam.zoom;
 
     // Camera-interpolatie (soepel toebewegen)
     this.cam.x += (this.targetCam.x - this.cam.x) * 0.12;
     this.cam.y += (this.targetCam.y - this.cam.y) * 0.12;
     this.cam.zoom += (this.targetCam.zoom - this.cam.zoom) * 0.12;
 
+    // Ná de interpolatie uitlezen, anders tekent de ondergrond op een andere
+    // zoomstand dan de bussen en lopen ze tijdens het zoomen uit elkaar.
+    const z = this.cam.zoom;
+
     ctx.fillStyle = c.bg;
     ctx.fillRect(0, 0, this.vw, this.vh);
 
+    // Projectie één keer per frame uitrekenen; de tekenlussen gebruiken
+    // deze getallen rechtstreeks in plaats van worldToScreen per punt.
+    this._proj = {
+      cx: this.cam.x, cy: this.cam.y,
+      kx: this.cosA * z, ky: this.sinA * this.tilt * z,
+      ox: this.vw / 2, oy: this.vh / 2,
+    };
+
     const b = this.viewportBounds();
 
-    // Detailniveau: ver uitgezoomd laten we de kleinste dingen weg. Ze zijn
-    // dan toch een paar pixels groot en ze kosten het meeste tekenwerk.
-    // Hoe platter de kanteling, hoe meer stad er in beeld past, dus dan
-    // schuift die grens mee.
+    // Detailniveau bepaalt welk tegelniveau we ophalen. Hoe platter de
+    // kanteling, hoe meer kaart er in beeld past, dus dat telt mee.
     const detail = z * Math.sqrt(this.tilt / 0.55);
-    const minFormaat = detail < 0.85 ? 26 : detail < 1.3 ? 12 : 0;
+    this.tekenTegels(ctx, b, detail);
 
-    // 1. Water en groen
-    this.drawLayer(ctx, this.mapData.water, b, (ctx, el) => this.drawPolygon(ctx, el.pts, c.water));
-    this.drawLayer(ctx, this.mapData.green, b, (ctx, el) => this.drawPolygon(ctx, el.pts, c.green), minFormaat);
-
-    // 2. Straten
-    const minWegBreedte = detail < 0.85 ? 5 : 0;
-    this.drawLayer(ctx, this.mapData.streets, b, (ctx, el) => {
-      if ((el.w || 5) < minWegBreedte) return;
-      this.drawPolyline(ctx, el.pts, (el.w || 5) >= 10 ? c.streetMajor : c.street,
-                        Math.max(1.2, (el.w || 5) * z * 0.9));
-    });
-
-    // 3. Gebouwen met 3D-extrusie
-    this.drawLayer(ctx, this.mapData.buildings, b, (ctx, el) => this.drawBuilding(ctx, el), minFormaat);
-
-    // 4. Lijnen, haltes, bussen
+    // Lijnen, straatnamen, haltes, bussen
     this.tekenLijnen(ctx, b);
+    if (this._zichtbareTegels) this.tekenStraatnamen(ctx, this._zichtbareTegels);
     this.tekenHaltes(ctx);
     this.tekenVoertuigen(ctx);
+  }
+
+  /**
+   * De kaartondergrond uit de tegels. Tegels worden van achter naar voren
+   * getekend: gevels steken omhoog en dus het beeld van de tegel áchter
+   * zich in, en die staat er dan al.
+   */
+  tekenTegels(ctx, bounds, detail) {
+    const bron = this.tegelBron;
+    if (!bron) return;
+    const c = this.colors;
+    const z = this.cam.zoom;
+
+    const niveau = bron.niveauVoor(detail);
+    const tegels = bron.zichtbaar(niveau, bounds);
+    this.tegelStand = { niveau, getekend: tegels.length, cache: bron.cache.size };
+    this._zichtbareTegels = tegels;
+
+    for (const t of tegels) {
+      for (const el of t.water) {
+        if (this.buitenBeeld(el, bounds)) continue;
+        this.tekenVlak(ctx, el.pts, c.water);
+      }
+      for (const el of t.green) {
+        if (this.buitenBeeld(el, bounds)) continue;
+        this.tekenVlak(ctx, el.pts, c.green);
+      }
+      for (const el of t.streets) {
+        if (this.buitenBeeld(el, bounds)) continue;
+        const breedte = el.breedte || 5;
+        this.tekenLijn(ctx, el.pts, breedte >= 10 ? c.streetMajor : c.street,
+                       Math.max(1.2, breedte * z * 0.9));
+      }
+      for (const el of t.buildings) {
+        if (this.buitenBeeld(el, bounds)) continue;
+        this.tekenGebouw(ctx, el);
+      }
+    }
+  }
+
+  /**
+   * Straatnamen langs hun straat. Ze draaien mee met de weg, wijken voor
+   * elkaar zodat er niets overlapt, en krijgen een randje in de
+   * achtergrondkleur zodat ze leesbaar blijven boven gevels.
+   */
+  tekenStraatnamen(ctx, tegels) {
+    const z = this.cam.zoom;
+    // Vanaf hier zijn er namen in de tegels (niveau 3); eerder heeft het
+    // geen zin, en veel later dan dit mist iemand ze bij normaal inzoomen.
+    if (z < 0.9) return;
+
+    const c = this.colors;
+    const grootte = Math.max(9, Math.min(13, 7 + z * 1.4));
+    ctx.font = `500 ${grootte}px ${this.labelFont || 'system-ui, sans-serif'}`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.lineJoin = 'round';
+    ctx.lineWidth = 3;
+
+    // Vervaagd binnenkomen zodra je genoeg ingezoomd bent
+    const alpha = Math.min(1, (z - 0.9) / 0.25);
+    const bezet = [];
+    let getekend = 0;
+
+    for (const t of tegels) {
+      if (!t.namen) continue;
+      for (const label of t.namen) {
+        if (getekend >= 150) break;
+        const p = this.worldToScreen(label.x, label.y);
+        if (p.x < 40 || p.x > this.vw - 40 || p.y < 20 || p.y > this.vh - 20) continue;
+
+        const breedte = ctx.measureText(label.naam).width;
+        const halfB = breedte / 2 + 6;
+        const halfH = grootte * 0.7;
+        // Botst dit label met een eerder geplaatst label?
+        let vrij = true;
+        for (const b of bezet) {
+          if (Math.abs(p.x - b.x) < halfB + b.hb && Math.abs(p.y - b.y) < halfH + b.hh) {
+            vrij = false;
+            break;
+          }
+        }
+        if (!vrij) continue;
+        bezet.push({ x: p.x, y: p.y, hb: halfB, hh: halfH });
+        getekend++;
+
+        let hoek = this.schermHoek(label.hoek);
+        if (Math.cos(hoek) < 0) hoek = hoek > 0 ? hoek - Math.PI : hoek + Math.PI;
+
+        ctx.save();
+        ctx.globalAlpha = alpha;
+        ctx.translate(p.x, p.y);
+        ctx.rotate(hoek);
+        ctx.strokeStyle = c.bg;
+        ctx.strokeText(label.naam, 0, 0);
+        ctx.fillStyle = c.text;
+        ctx.globalAlpha = alpha * 0.75;
+        ctx.fillText(label.naam, 0, 0);
+        ctx.restore();
+      }
+    }
+  }
+
+  buitenBeeld(el, bounds) {
+    return el.maxX < bounds.minX || el.minX > bounds.maxX ||
+           el.maxY < bounds.minY || el.minY > bounds.maxY;
+  }
+
+  /** Vlak uit een platte Float32Array [x0,y0,x1,y1,…]. */
+  tekenVlak(ctx, pts, fill) {
+    const n = pts.length;
+    if (n < 6) return;
+    const p = this._proj;
+    ctx.beginPath();
+    let dx = pts[0] - p.cx, dy = pts[1] - p.cy;
+    ctx.moveTo((dx - dy) * p.kx + p.ox, (dx + dy) * p.ky + p.oy);
+    for (let i = 2; i < n; i += 2) {
+      dx = pts[i] - p.cx;
+      dy = pts[i + 1] - p.cy;
+      ctx.lineTo((dx - dy) * p.kx + p.ox, (dx + dy) * p.ky + p.oy);
+    }
+    ctx.closePath();
+    ctx.fillStyle = fill;
+    ctx.fill();
+  }
+
+  /** Polylijn uit een platte Float32Array. */
+  tekenLijn(ctx, pts, kleur, breedte) {
+    const n = pts.length;
+    if (n < 4) return;
+    const p = this._proj;
+    ctx.strokeStyle = kleur;
+    ctx.lineWidth = breedte;
+    ctx.beginPath();
+    let dx = pts[0] - p.cx, dy = pts[1] - p.cy;
+    ctx.moveTo((dx - dy) * p.kx + p.ox, (dx + dy) * p.ky + p.oy);
+    for (let i = 2; i < n; i += 2) {
+      dx = pts[i] - p.cx;
+      dy = pts[i + 1] - p.cy;
+      ctx.lineTo((dx - dy) * p.kx + p.ox, (dx + dy) * p.ky + p.oy);
+    }
+    ctx.stroke();
+  }
+
+  /** Gebouw met 3D-extrusie uit een platte Float32Array. */
+  tekenGebouw(ctx, el) {
+    const pts = el.pts;
+    const n = pts.length >> 1;
+    if (n < 3) return;
+
+    const hoogte = Math.max(6, el.hoogte || 9) * this.heightScale * this.cam.zoom;
+    const p = this._proj;
+
+    let sx = this._gevelX, sy = this._gevelY;
+    if (!sx || sx.length < n) {
+      sx = this._gevelX = new Float64Array(Math.max(n, 256));
+      sy = this._gevelY = new Float64Array(Math.max(n, 256));
+    }
+    for (let i = 0; i < n; i++) {
+      const dx = pts[i * 2] - p.cx;
+      const dy = pts[i * 2 + 1] - p.cy;
+      sx[i] = (dx - dy) * p.kx + p.ox;
+      sy[i] = (dx + dy) * p.ky + p.oy;
+    }
+
+    // Windingsrichting op het scherm: daarmee weten we welke zijvlakken
+    // naar de kijker wijzen en welke we mogen overslaan.
+    let oppervlak = 0;
+    for (let i = 0, j = n - 1; i < n; j = i++) {
+      oppervlak += sx[j] * sy[i] - sx[i] * sy[j];
+    }
+    const teken = oppervlak > 0 ? 1 : -1;
+
+    const palet = this._gevelPalet;
+    const tint = el.tint || 0;
+
+    if (hoogte > 1) {
+      ctx.fillStyle = palet ? palet.zij[tint] : this.colors.buildingSide;
+      ctx.beginPath();
+      for (let i = 0, j = n - 1; i < n; j = i++) {
+        if (-(sx[i] - sx[j]) * teken <= 0) continue;
+        ctx.moveTo(sx[j], sy[j]);
+        ctx.lineTo(sx[i], sy[i]);
+        ctx.lineTo(sx[i], sy[i] - hoogte);
+        ctx.lineTo(sx[j], sy[j] - hoogte);
+        ctx.closePath();
+      }
+      ctx.fill();
+    }
+
+    ctx.beginPath();
+    ctx.moveTo(sx[0], sy[0] - hoogte);
+    for (let i = 1; i < n; i++) ctx.lineTo(sx[i], sy[i] - hoogte);
+    ctx.closePath();
+    ctx.fillStyle = palet ? palet.dak[tint] : this.colors.buildingRoof;
+    ctx.fill();
+    if (this.cam.zoom > 0.8) {
+      ctx.strokeStyle = this.colors.buildingLijn;
+      ctx.lineWidth = 0.6;
+      ctx.stroke();
+    }
   }
 
   viewportBounds() {
@@ -631,39 +800,6 @@ export class IsoRenderer {
     };
   }
 
-  drawLayer(ctx, elements, bounds, drawFn, minFormaat = 0) {
-    if (!elements) return;
-    for (const el of elements) {
-      const eb = el._b || (el._b = boundsVan(el.pts));
-      if (!eb) continue;
-      if (eb.maxX < bounds.minX || eb.minX > bounds.maxX ||
-          eb.maxY < bounds.minY || eb.minY > bounds.maxY) continue;
-      if (minFormaat && Math.max(eb.maxX - eb.minX, eb.maxY - eb.minY) < minFormaat) continue;
-      drawFn(ctx, el);
-    }
-  }
-
-  inBounds(pts, bounds) {
-    const eb = boundsVan(pts);
-    if (!eb) return false;
-    return !(eb.maxX < bounds.minX || eb.minX > bounds.maxX ||
-             eb.maxY < bounds.minY || eb.minY > bounds.maxY);
-  }
-
-  drawPolygon(ctx, pts, fill) {
-    if (pts.length < 3) return;
-    ctx.beginPath();
-    const p0 = this.worldToScreen(pts[0][0], pts[0][1]);
-    ctx.moveTo(p0.x, p0.y);
-    for (let i = 1; i < pts.length; i++) {
-      const p = this.worldToScreen(pts[i][0], pts[i][1]);
-      ctx.lineTo(p.x, p.y);
-    }
-    ctx.closePath();
-    ctx.fillStyle = fill;
-    ctx.fill();
-  }
-
   drawPolyline(ctx, pts, color, width) {
     if (pts.length < 2) return;
     ctx.strokeStyle = color;
@@ -678,59 +814,6 @@ export class IsoRenderer {
       ctx.lineTo(p.x, p.y);
     }
     ctx.stroke();
-  }
-
-  drawBuilding(ctx, el) {
-    const c = this.colors;
-    const pts = el.pts;
-    if (pts.length < 3) return;
-
-    const heightM = Math.max(6, el.h || 9);
-    const hoogte = heightM * this.heightScale * this.cam.zoom;
-
-    const grond = pts.map(p => this.worldToScreen(p[0], p[1]));
-
-    // Windingsrichting op het scherm bepalen — daarmee weten we welke
-    // zijvlakken naar de kijker toe wijzen (en welke we dus mogen skippen).
-    let oppervlak = 0;
-    for (let i = 0; i < grond.length - 1; i++) {
-      oppervlak += grond[i].x * grond[i + 1].y - grond[i + 1].x * grond[i].y;
-    }
-    const teken = oppervlak > 0 ? 1 : -1;
-
-    const palet = this._gevelPalet;
-    const tint = el._tint || 0;
-
-    if (hoogte > 1) {
-      ctx.fillStyle = palet ? palet.zij[tint] : c.buildingSide;
-      ctx.beginPath();
-      for (let i = 0; i < grond.length - 1; i++) {
-        const a = grond[i], b = grond[i + 1];
-        // Buitennormaal op het scherm: wijst-ie naar beneden, dan zien we het vlak
-        if (-(b.x - a.x) * teken <= 0) continue;
-        ctx.moveTo(a.x, a.y);
-        ctx.lineTo(b.x, b.y);
-        ctx.lineTo(b.x, b.y - hoogte);
-        ctx.lineTo(a.x, a.y - hoogte);
-        ctx.closePath();
-      }
-      ctx.fill();
-    }
-
-    // Dak
-    ctx.beginPath();
-    ctx.moveTo(grond[0].x, grond[0].y - hoogte);
-    for (let i = 1; i < grond.length; i++) {
-      ctx.lineTo(grond[i].x, grond[i].y - hoogte);
-    }
-    ctx.closePath();
-    ctx.fillStyle = palet ? palet.dak[tint] : c.buildingRoof;
-    ctx.fill();
-    if (this.cam.zoom > 0.8) {
-      ctx.strokeStyle = c.buildingLijn;
-      ctx.lineWidth = 0.6;
-      ctx.stroke();
-    }
   }
 
   tekenLijnen(ctx, bounds) {

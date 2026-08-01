@@ -1,6 +1,7 @@
 [Unit]
 Description=Bussie — Live buskaart backend
-After=network.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
@@ -9,7 +10,8 @@ Group=pieter
 WorkingDirectory=/home/pieter/hodc/bussie
 Environment=BUSSIE_PORT=8900
 ExecStart=/usr/bin/python3 /home/pieter/hodc/bussie/backend/gtfs_processor.py
-Restart=on-failure
+# Ook herstarten als het proces netjes afsluit; de kaart hoort te draaien
+Restart=always
 RestartSec=5
 
 [Install]

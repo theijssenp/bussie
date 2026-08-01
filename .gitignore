@@ -1,10 +1,7 @@
-# Data bestanden (te groot voor git)
-data/gtfs-nl.zip
-data/groningen.json
-data/lijnen.json
-data/traces.db
-data/traces.db-wal
-data/traces.db-shm
+# Data: alles hierin wordt gegenereerd of gedownload en is te groot voor git.
+# Opnieuw te maken met kaart_generator.py, lijn_routes.py, tegels_nl.py,
+# steden.py en straatnamen.py — zie README.
+data/
 
 # Python
 __pycache__/

@@ -29,8 +29,9 @@ DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data"
 GTFS_ZIP_PATH = os.path.join(DATA_DIR, "gtfs-nl.zip")
 OUT_PATH = os.path.join(DATA_DIR, "lijnen.json")
 
-# Moet gelijk zijn aan kaart_generator.py
-CENTER = {"lon": 6.563, "lat": 53.2265}
+# Landelijk nulpunt — moet gelijk zijn aan tegels.py CENTER_NL, anders
+# liggen de lijnen niet op de kaart.
+CENTER = {"lon": 5.4, "lat": 52.15}
 BBOX = [53.18, 6.50, 53.28, 6.62]  # min_lat, min_lon, max_lat, max_lon
 AGENCIES = {"QBUZZ"}
 

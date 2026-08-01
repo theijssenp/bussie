@@ -4,6 +4,7 @@
 // ============================================================
 
 import { IsoRenderer } from './kaart.js';
+import { TegelBron } from './tegels.js';
 
 // ---------------------------------------------------------------------------
 // Boot
@@ -41,21 +42,24 @@ document.getElementById('thema-knop').textContent = savedTheme === 'light' ? '�
 
 bootProgress(10, 'Kaartdata laden…');
 
-let mapData = null;
+let tegelBron = null;
 let vehicles = [];
 let activeLines = new Map();   // lijn → {bestemming, count, kleur}
 let lijnKleuren = new Map();   // lijn → kleur uit de GTFS
 
 async function loadMap() {
   try {
-    const resp = await fetch('/data/groningen.json');
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    mapData = await resp.json();
-    renderer.setMapData(mapData);
+    // De kaartondergrond komt in tegels binnen; hier halen we alleen de
+    // index op met welke tegels er zijn. De rest laadt vanzelf tijdens
+    // het tekenen, afhankelijk van waar je kijkt.
+    tegelBron = new TegelBron('/data/tegels');
+    await tegelBron.laadIndex();
+    renderer.setTegelBron(tegelBron);
+    tegelBron.opGeladen = () => renderer.render();
     bootProgress(35, 'Buslijnen laden…');
   } catch (err) {
     bootMsg.textContent = 'Kaartdata niet beschikbaar';
-    console.error('Kaartdata laden mislukt:', err);
+    console.error('Tegelindex laden mislukt:', err);
     return;
   }
 
@@ -202,7 +206,252 @@ lijnenKnop.addEventListener('click', () => {
   lijnFilterOpen = !lijnFilterOpen;
   lijnFilterDiv.style.display = lijnFilterOpen ? 'block' : 'none';
   lijnenKnop.classList.toggle('actief', lijnFilterOpen);
-  if (lijnFilterOpen) sluitOverzicht();
+  if (lijnFilterOpen) {
+    sluitOverzicht();
+    sluitSteden();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Opening — boven Groningen beginnen en rustig inzakken op het busstation
+// ---------------------------------------------------------------------------
+
+const OPENING = {
+  duur: 9000,       // milliseconden
+  beginZoom: 0.75,
+  eindZoom: 3.2,
+};
+let openingBezig = false;
+
+/** Het busstation zoeken tussen de haltes; anders het stadscentrum. */
+function openingsDoel() {
+  const perrons = renderer.haltes.filter(h => h.naam.includes('Groningen, Hoofdstation'));
+  if (perrons.length) {
+    return {
+      x: perrons.reduce((n, h) => n + h.x, 0) / perrons.length,
+      y: perrons.reduce((n, h) => n + h.y, 0) / perrons.length,
+    };
+  }
+  return plaatsen.find(p => p.naam === 'Groningen') || null;
+}
+
+function startOpening() {
+  const stad = plaatsen.find(p => p.naam === 'Groningen');
+  const doel = openingsDoel();
+  if (!stad || !doel) return;
+
+  // Meteen boven Groningen staan, daarna pas bewegen
+  renderer.cam.x = renderer.targetCam.x = stad.x;
+  renderer.cam.y = renderer.targetCam.y = stad.y;
+  renderer.cam.zoom = renderer.targetCam.zoom = OPENING.beginZoom;
+
+  openingBezig = true;
+  const begin = performance.now();
+  const van = { x: stad.x, y: stad.y, zoom: OPENING.beginZoom };
+
+  function stap(nu) {
+    if (!openingBezig) return;
+    const t = Math.min(1, (nu - begin) / OPENING.duur);
+    // Zacht op gang en zacht uitlopend
+    const e = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+
+    // Zoomen gaat logaritmisch, anders lijkt het eind veel sneller te gaan
+    const zoom = van.zoom * Math.pow(OPENING.eindZoom / van.zoom, e);
+    renderer.cam.x = renderer.targetCam.x = van.x + (doel.x - van.x) * e;
+    renderer.cam.y = renderer.targetCam.y = van.y + (doel.y - van.y) * e;
+    renderer.cam.zoom = renderer.targetCam.zoom = zoom;
+
+    if (t < 1) requestAnimationFrame(stap);
+    else openingBezig = false;
+  }
+  requestAnimationFrame(stap);
+}
+
+/** Zodra iemand zelf de kaart aanraakt is de opening voorbij. */
+function stopOpening() {
+  if (!openingBezig) return;
+  openingBezig = false;
+  renderer.targetCam.x = renderer.cam.x;
+  renderer.targetCam.y = renderer.cam.y;
+  renderer.targetCam.zoom = renderer.cam.zoom;
+}
+
+for (const gebeurtenis of ['mousedown', 'wheel', 'touchstart']) {
+  canvas.addEventListener(gebeurtenis, stopOpening, { passive: true });
+}
+window.addEventListener('keydown', stopOpening);
+
+// ---------------------------------------------------------------------------
+// Plaatsen — springen naar een stad of dorp
+// ---------------------------------------------------------------------------
+
+const stedenPaneel = document.getElementById('steden');
+const stedenKnop = document.getElementById('steden-knop');
+const stedenZoek = document.getElementById('steden-zoek');
+const stedenLijst = document.getElementById('steden-lijst');
+let plaatsen = [];
+let stedenOpen = false;
+let gemarkeerd = 0;
+
+async function laadPlaatsen() {
+  try {
+    const resp = await fetch('/data/steden.json');
+    if (!resp.ok) return;
+    plaatsen = (await resp.json()).plaatsen || [];
+    console.log(`${plaatsen.length} plaatsen geladen`);
+  } catch (err) {
+    console.warn('Plaatsen laden mislukt:', err);
+  }
+}
+
+/** Diakrieten weg, zodat "Den Bosch" ook 's-Hertogenbosch vindt via "bosch". */
+function vereenvoudigd(tekst) {
+  return tekst.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+}
+
+function gefilterdePlaatsen() {
+  const term = vereenvoudigd(stedenZoek.value.trim());
+  if (!term) {
+    // Zonder zoekterm: de grootste plaatsen bovenaan
+    return [...plaatsen].sort((a, b) => b.inwoners - a.inwoners).slice(0, 40);
+  }
+  return plaatsen
+    .filter(p => vereenvoudigd(p.naam).includes(term))
+    .sort((a, b) => {
+      // Wie met de zoekterm begint, staat voorop
+      const aStart = vereenvoudigd(a.naam).startsWith(term);
+      const bStart = vereenvoudigd(b.naam).startsWith(term);
+      if (aStart !== bStart) return aStart ? -1 : 1;
+      return b.inwoners - a.inwoners;
+    })
+    .slice(0, 40);
+}
+
+function toonPlaatsen() {
+  const lijst = gefilterdePlaatsen();
+  gemarkeerd = 0;
+
+  if (!lijst.length) {
+    stedenLijst.innerHTML = '<div class="leeg">Niets gevonden</div>';
+    return;
+  }
+
+  stedenLijst.innerHTML = lijst.map((p, i) => `
+    <div class="plaats${i === 0 ? ' actief' : ''}" data-i="${i}">
+      <span class="naam">${p.naam}</span>
+      <span class="inwoners">${p.inwoners ? p.inwoners.toLocaleString('nl-NL') : ''}</span>
+    </div>`).join('');
+
+  stedenLijst.querySelectorAll('.plaats').forEach(el => {
+    el.addEventListener('click', () => gaNaar(lijst[+el.dataset.i]));
+  });
+}
+
+// Hoe ver rond een plaats we naar bussen zoeken, per soort
+const ZOEKSTRAAL = { city: 8000, town: 5000, village: 3000 };
+const DRUKTE_CEL = 600;   // meter; het raster waarin we bussen tellen
+
+/**
+ * De drukste plek binnen een plaats: het rastervak met de meeste bussen,
+ * plus zijn buren, en daarvan het zwaartepunt. Zonder bussen in de buurt
+ * (nacht, klein dorp) valt het terug op het midden van de plaats zelf.
+ */
+function druksteplek(plaats) {
+  const straal = ZOEKSTRAAL[plaats.soort] || 5000;
+  const dichtbij = [];
+  for (const v of vehicles) {
+    const x = v._dispWx !== undefined ? v._dispWx : v._wx;
+    const y = v._dispWy !== undefined ? v._dispWy : v._wy;
+    if (x === undefined) continue;
+    if (Math.abs(x - plaats.x) > straal || Math.abs(y - plaats.y) > straal) continue;
+    dichtbij.push({ x, y });
+  }
+  if (dichtbij.length < 2) return null;
+
+  const vakken = new Map();
+  for (const p of dichtbij) {
+    const sleutel = `${Math.floor(p.x / DRUKTE_CEL)},${Math.floor(p.y / DRUKTE_CEL)}`;
+    const vak = vakken.get(sleutel);
+    if (vak) vak.push(p);
+    else vakken.set(sleutel, [p]);
+  }
+
+  let beste = null, besteAantal = 0;
+  for (const [sleutel, punten] of vakken) {
+    const [cx, cy] = sleutel.split(',').map(Number);
+    // Buren meetellen, anders wint een toevallige celgrens
+    let aantal = 0, sx = 0, sy = 0;
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dy = -1; dy <= 1; dy++) {
+        for (const p of vakken.get(`${cx + dx},${cy + dy}`) || []) {
+          aantal++;
+          sx += p.x;
+          sy += p.y;
+        }
+      }
+    }
+    if (aantal > besteAantal) {
+      besteAantal = aantal;
+      beste = { x: sx / aantal, y: sy / aantal, aantal };
+    }
+  }
+  return besteAantal >= 2 ? beste : null;
+}
+
+function gaNaar(plaats) {
+  if (!plaats) return;
+  stopOpening();
+
+  const druk = druksteplek(plaats);
+  if (druk) {
+    // Op de bussen inzoomen is zinvol alleen als je ze ook ziet rijden
+    renderer.setCenter(druk.x, druk.y, Math.max(plaats.zoom || 2, 3.0));
+    console.log(`${plaats.naam}: ${druk.aantal} bussen op de drukste plek`);
+  } else {
+    renderer.setCenter(plaats.x, plaats.y, plaats.zoom || 2);
+  }
+  sluitSteden();
+}
+
+function sluitSteden() {
+  stedenOpen = false;
+  stedenPaneel.style.display = 'none';
+  stedenKnop.classList.remove('actief');
+}
+
+stedenKnop.addEventListener('click', () => {
+  stedenOpen = !stedenOpen;
+  stedenPaneel.style.display = stedenOpen ? 'block' : 'none';
+  stedenKnop.classList.toggle('actief', stedenOpen);
+  if (stedenOpen) {
+    sluitOverzicht();
+    lijnFilterOpen = false;
+    lijnFilterDiv.style.display = 'none';
+    lijnenKnop.classList.remove('actief');
+    stedenZoek.value = '';
+    toonPlaatsen();
+    stedenZoek.focus();
+  }
+});
+
+stedenZoek.addEventListener('input', toonPlaatsen);
+
+// Met de pijltjes door de lijst, enter springt erheen
+stedenZoek.addEventListener('keydown', (e) => {
+  const items = [...stedenLijst.querySelectorAll('.plaats')];
+  if (e.key === 'Escape') return sluitSteden();
+  if (!items.length) return;
+
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    e.preventDefault();
+    items[gemarkeerd]?.classList.remove('actief');
+    gemarkeerd = (gemarkeerd + (e.key === 'ArrowDown' ? 1 : items.length - 1)) % items.length;
+    items[gemarkeerd].classList.add('actief');
+    items[gemarkeerd].scrollIntoView({ block: 'nearest' });
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    items[gemarkeerd]?.click();
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -330,6 +579,7 @@ overzichtKnop.addEventListener('click', () => {
     lijnFilterOpen = false;
     lijnFilterDiv.style.display = 'none';
     lijnenKnop.classList.remove('actief');
+    sluitSteden();
     updateBusoverzicht();
   }
 });
@@ -424,9 +674,9 @@ kantelSlider.addEventListener('input', () => {
 // ---------------------------------------------------------------------------
 
 document.getElementById('locatie-knop').addEventListener('click', () => {
-  if (!navigator.geolocation || !mapData) return;
+  if (!navigator.geolocation || !renderer.center) return;
   navigator.geolocation.getCurrentPosition((pos) => {
-    const center = mapData.center;
+    const center = renderer.center;
     const R = 6378137, n = Math.PI / 180, cosLat = Math.cos(center.lat * n);
     const wx = (pos.coords.longitude - center.lon) * n * R * cosLat;
     const wy = -(pos.coords.latitude - center.lat) * n * R;
@@ -453,12 +703,14 @@ async function start() {
   setInterval(updateKlok, 1000);
 
   await loadMap();
+  await laadPlaatsen();
   bootProgress(70, 'Realtime data ophalen…');
 
   await pollVehicles(true);
   bootProgress(95, 'Klaar…');
 
   renderLoop();
+  startOpening();
   setInterval(() => pollVehicles(), 20000);
 
   // De zijbalk toont afstanden tot de volgende halte — die lopen mee.

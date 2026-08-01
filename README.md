@@ -58,14 +58,25 @@ gtfs.ovapi.nl/nl/vehiclePositions.pb    ← Nederlandse open data (GTFS-RT proto
 
 ## Installatie
 
-1. Kaartdata genereren (eenmalig):
+1. Kaartdata genereren (eenmalig). Voor heel Nederland:
    ```bash
    cd ~/hodc/bussie
-   python3 backend/kaart_generator.py   # OSM → data/groningen.json
-   python3 backend/lijn_routes.py       # GTFS → data/lijnen.json
+   # OSM-extract ophalen (~1,4 GB)
+   curl -L -o data/netherlands-latest.osm.pbf \
+        https://download.geofabrik.de/europe/netherlands-latest.osm.pbf
+
+   python3 backend/tegels_nl.py     # PBF  → data/tegels/ (tegelpiramide)
+   python3 backend/straatnamen.py   # PBF  → straatnamen per tegel (.lbl)
+   python3 backend/steden.py        # PBF  → data/steden.json (plaatsenkiezer)
+   python3 backend/lijn_routes.py   # GTFS → data/lijnen.json (lijnroutes)
    ```
-   `lijn_routes.py` leest `data/gtfs-nl.zip`, dus draai dit opnieuw als de
+   Voor één stad kan het ook zonder PBF: `kaart_generator.py` haalt via
+   Overpass een stadsgebied op, en `tegels.py` knipt dat in tegels.
+
+   `lijn_routes.py` leest `data/gtfs-nl.zip`, dus draai dat opnieuw als de
    dienstregeling wisselt (lijnen, kleuren of haltes veranderen dan).
+   `tegels_nl.py` en `straatnamen.py` werken het bouwstempel in
+   `data/tegels/index.json` bij, waardoor browsers hun cache verversen.
 
 2. Backend starten:
    ```bash

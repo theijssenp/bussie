@@ -168,6 +168,49 @@
     }
     #bus-info .veld.volgende span { grid-area: afstand; font-variant-numeric: tabular-nums; }
 
+    /* Plaatsenkiezer */
+    #steden {
+      position: absolute;
+      top: 60px; right: 16px;
+      width: 244px;
+      display: none;
+      padding: 8px;
+      overflow: hidden;
+    }
+    #steden-zoek {
+      width: 100%;
+      padding: 7px 10px;
+      border: 1px solid var(--panel-border);
+      border-radius: 8px;
+      background: var(--accent-soft);
+      color: var(--fg);
+      font-family: var(--font);
+      font-size: 13px;
+    }
+    #steden-zoek::placeholder { color: var(--muted); }
+    #steden-zoek:focus { outline: none; border-color: var(--accent); }
+    #steden-lijst {
+      max-height: min(50vh, 420px);
+      overflow-y: auto;
+      margin-top: 6px;
+    }
+    #steden-lijst .plaats {
+      display: flex; justify-content: space-between; align-items: baseline; gap: 8px;
+      padding: 6px 8px; border-radius: 8px; cursor: pointer;
+      transition: background 0.12s;
+    }
+    #steden-lijst .plaats:hover,
+    #steden-lijst .plaats.actief { background: var(--accent-soft); }
+    #steden-lijst .plaats .naam {
+      font-size: 13px;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    #steden-lijst .plaats .inwoners {
+      font-size: 11px; color: var(--muted);
+      font-variant-numeric: tabular-nums; white-space: nowrap;
+    }
+    #steden-lijst .leeg { padding: 10px 8px; font-size: 12px; color: var(--muted); }
+
     /* Lijn filter dropdown */
     #lijn-filter {
       position: absolute;
@@ -339,8 +382,15 @@
   <div id="controls">
     <button class="knop" id="thema-knop" title="Thema wisselen">☀</button>
     <button class="knop" id="locatie-knop" title="Naar mijn locatie">📍</button>
+    <button class="knop" id="steden-knop" title="Naar een plaats">Plaatsen</button>
     <button class="knop" id="lijnen-knop" title="Lijnfilter">Lijnen</button>
     <button class="knop" id="overzicht-knop" title="Busoverzicht">Bussen</button>
+  </div>
+
+  <!-- Plaatsen -->
+  <div id="steden" class="panel">
+    <input type="search" id="steden-zoek" placeholder="Zoek een plaats…" autocomplete="off">
+    <div id="steden-lijst"></div>
   </div>
 
   <!-- Lijn filter -->
@@ -363,7 +413,7 @@
   <!-- Status -->
   <div id="laden"></div>
 
-  <script type="module" src="/js/kaart.js?v=10"></script>
-  <script type="module" src="/js/app.js?v=10"></script>
+  <script type="module" src="/js/kaart.js?v=11"></script>
+  <script type="module" src="/js/app.js?v=11"></script>
 </body>
 </html>

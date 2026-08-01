@@ -104,6 +104,22 @@ def init_db(conn):
     conn.commit()
 
 
+def ruim_op(conn, dagen=3):
+    """Gooi posities weg die ouder zijn dan `dagen`.
+
+    Landelijk komt er ongeveer een half GB per dag bij. Drie dagen is ruim
+    genoeg voor waar de historie voor dient: routes reconstrueren en bij het
+    laden de vorige positie kennen.
+    """
+    grens = int(time.time()) - dagen * 86400
+    cur = conn.execute("DELETE FROM vehicle_positions WHERE stored_at < ?", (grens,))
+    conn.commit()
+    weg = cur.rowcount
+    if weg > 0:
+        log.info("Opgeruimd: %d posities ouder dan %d dagen", weg, dagen)
+    return weg
+
+
 def store_positions(conn, vehicles):
     """Sla een batch voertuigposities op, inclusief latest_vehicles."""
     now = int(time.time())
