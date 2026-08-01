@@ -5,6 +5,21 @@
 
 const TAU = Math.PI * 2;
 
+// Zo ver mag je uitzoomen; daaronder is het kaartbeeld niet meer te lezen
+const MIN_ZOOM = 0.0033;
+
+// Onder deze zoom draait de kaart naar het noorden en gaat de kanteling
+// eruit: op landsbreedte wil je een kaart zien, geen scheef blok
+const ATLAS_ZOOM = 0.035;
+
+// Tot deze zoom staan er plaatsnamen op de kaart; daarboven nemen de
+// straatnamen het over en zou het dubbelop worden
+const PLAATS_TOT = 0.9;
+
+// Onder deze zoom worden bussen stipjes: een busje van drie beeldpunten
+// is toch niet te herkennen, en het scheelt duizenden tekenopdrachten
+const STIP_ZOOM = 0.5;
+
 // Zover mag een busje maximaal meekantelen met de weg (30°)
 const MAX_BUSKANTELING = Math.PI / 6;
 
@@ -44,6 +59,7 @@ export class IsoRenderer {
         buildingRoof: '#dcdcd8',
         buildingSide: '#b4b4b0',
         buildingLijn: 'rgba(43,48,56,0.06)',
+        bebouwing: '#d3cec4',      // platte stadsvlek ver uitgezoomd
         water: '#a8d4ea',
         green: '#cbe7c4',
         route: '#8aa0b2',
@@ -66,6 +82,7 @@ export class IsoRenderer {
         buildingRoof: '#2e3648',
         buildingSide: '#1c212c',
         buildingLijn: 'rgba(0,0,0,0.25)',
+        bebouwing: '#212734',      // platte stadsvlek ver uitgezoomd
         water: '#17334f',
         green: '#1a3328',
         route: '#7f96ab',
@@ -88,11 +105,15 @@ export class IsoRenderer {
     // De kanteling bepaalt hoe schuin we kijken: 1 = recht van boven,
     // 0,5 = het klassieke 2:1 dimetrische beeld. Lager = platter kijken.
     this.isoAngle = Math.PI / 4;
-    this.cosA = Math.cos(this.isoAngle);
-    this.sinA = Math.sin(this.isoAngle);
+    this.draai = this.isoAngle;     // huidige draaiing, wordt geanimeerd
+    this.cosA = Math.cos(this.draai);
+    this.sinA = Math.sin(this.draai);
     this.tilt = 0.3;
     const bewaardeTilt = parseFloat(localStorage.getItem('bussie-tilt2'));
     if (bewaardeTilt >= 0.3 && bewaardeTilt <= 1) this.tilt = bewaardeTilt;
+    // Wat de schuifregelaar zegt. In de atlasstand wijkt de getekende
+    // kanteling daarvan af, en bij het inzoomen komt hij hier weer op uit.
+    this.tiltVoorkeur = this.tilt;
 
     // Gebouwextrusie (pixels per meter hoogte). Hoe schuiner we kijken,
     // hoe meer gevel er te zien is, dus dit mag wat royaler.
@@ -208,8 +229,8 @@ export class IsoRenderer {
     const dy = wy - this.cam.y;
     const z = this.cam.zoom;
     return {
-      x: (dx - dy) * this.cosA * z + this.vw / 2,
-      y: (dx + dy) * this.sinA * this.tilt * z + this.vh / 2,
+      x: (dx * this.cosA - dy * this.sinA) * z + this.vw / 2,
+      y: (dx * this.sinA + dy * this.cosA) * this.tilt * z + this.vh / 2,
     };
   }
 
@@ -217,19 +238,21 @@ export class IsoRenderer {
     const z = this.cam.zoom;
     const px = (sx - this.vw / 2) / z;
     const py = (sy - this.vh / 2) / (z * this.tilt);
+    // Terugdraaien: de omgekeerde rotatie op het ingedrukte beeld
     return {
-      x: (px / this.cosA + py / this.sinA) / 2 + this.cam.x,
-      y: (py / this.sinA - px / this.cosA) / 2 + this.cam.y,
+      x: px * this.cosA + py * this.sinA + this.cam.x,
+      y: -px * this.sinA + py * this.cosA + this.cam.y,
     };
   }
 
   /** Kantelstand aanpassen (0,3 = heel schuin, 1 = recht van boven). */
   setTilt(tilt) {
-    this.tilt = Math.max(0.3, Math.min(1, tilt));
+    this.tiltVoorkeur = Math.max(0.3, Math.min(1, tilt));
+    if (this.cam.zoom >= ATLAS_ZOOM) this.tilt = this.tiltVoorkeur;
     // Tijdens het slepen niet bij elke stap naar localStorage schrijven
     clearTimeout(this._tiltTimer);
     this._tiltTimer = setTimeout(() => {
-      localStorage.setItem('bussie-tilt2', String(this.tilt));
+      localStorage.setItem('bussie-tilt2', String(this.tiltVoorkeur));
     }, 400);
   }
 
@@ -243,9 +266,9 @@ export class IsoRenderer {
 
   pan(dx, dy) {
     const z = this.cam.zoom;
-    const dyt = dy / this.tilt;
-    const wdx = (dx / this.cosA + dyt / this.sinA) / (2 * z);
-    const wdy = (dyt / this.sinA - dx / this.cosA) / (2 * z);
+    const px = dx / z, py = dy / (z * this.tilt);
+    const wdx = px * this.cosA + py * this.sinA;
+    const wdy = -px * this.sinA + py * this.cosA;
     this.cam.x -= wdx;
     this.cam.y -= wdy;
     this.targetCam.x = this.cam.x;
@@ -254,7 +277,9 @@ export class IsoRenderer {
 
   zoomAt(sx, sy, factor) {
     const worldBefore = this.screenToWorld(sx, sy);
-    this.cam.zoom = Math.max(0.35, Math.min(6, this.cam.zoom * factor));
+    // Ondergrens: hier past heel Nederland in beeld. Verder uit heeft geen
+    // zin — dan kijk je naar de Noordzee.
+    this.cam.zoom = Math.max(MIN_ZOOM, Math.min(6, this.cam.zoom * factor));
     this.targetCam.zoom = this.cam.zoom;
     const worldAfter = this.screenToWorld(sx, sy);
     this.cam.x += worldBefore.x - worldAfter.x;
@@ -287,6 +312,17 @@ export class IsoRenderer {
     this.lijnIndex.clear();
 
     for (const r of this.lijnen) {
+      // Cumulatieve afstand langs de route. Die staat niet in het bestand —
+      // hem hier uitrekenen kost een paar milliseconden en scheelt een derde
+      // aan overdracht.
+      if (!r.cum) {
+        const cum = new Float64Array(r.pts.length);
+        for (let i = 1; i < r.pts.length; i++) {
+          cum[i] = cum[i - 1] + Math.hypot(r.pts[i][0] - r.pts[i - 1][0],
+                                           r.pts[i][1] - r.pts[i - 1][1]);
+        }
+        r.cum = cum;
+      }
       // Zichtbaar deel: alleen wat binnen de kaartrand valt, opgeknipt in
       // losse stukken zodat een lijn niet dwars door leeg gebied doorloopt.
       r._segmenten = this.knipOpKaart(r.pts);
@@ -294,7 +330,6 @@ export class IsoRenderer {
         this.lijnIndex.set(`${rid}|${r.richting}`, r);
         if (!this.lijnIndex.has(rid)) this.lijnIndex.set(rid, r);
       }
-      this.lijnIndex.set(`lijn:${r.lijn}|${r.richting}`, r);
     }
 
     // Haltes ontdubbelen; onthoud welke lijnen er stoppen
@@ -338,10 +373,14 @@ export class IsoRenderer {
   }
 
   /** De lijnroute waar dit voertuig op rijdt (of null). */
+  /**
+   * De lijnroute waar dit voertuig op rijdt. Alleen op route_id matchen:
+   * op lijnnummer zou lijn 1 uit Amsterdam aan lijn 1 uit Groningen worden
+   * gekoppeld, en dan glijdt een bus honderd kilometer verderop.
+   */
   routeVoor(v) {
     return (
       this.lijnIndex.get(`${v.rid}|${v.richting}`) ||
-      this.lijnIndex.get(`lijn:${v.lijn}|${v.richting}`) ||
       this.lijnIndex.get(v.rid) ||
       null
     );
@@ -559,6 +598,17 @@ export class IsoRenderer {
     // zoomstand dan de bussen en lopen ze tijdens het zoomen uit elkaar.
     const z = this.cam.zoom;
 
+    // Naar de atlasstand toe draaien (noorden boven, plat) of er weer uit
+    const atlas = z < ATLAS_ZOOM;
+    const doelDraai = atlas ? 0 : this.isoAngle;
+    const doelTilt = atlas ? 1 : this.tiltVoorkeur;
+    if (Math.abs(this.draai - doelDraai) > 0.0005 || Math.abs(this.tilt - doelTilt) > 0.0005) {
+      this.draai += (doelDraai - this.draai) * 0.09;
+      this.tilt += (doelTilt - this.tilt) * 0.09;
+      this.cosA = Math.cos(this.draai);
+      this.sinA = Math.sin(this.draai);
+    }
+
     ctx.fillStyle = c.bg;
     ctx.fillRect(0, 0, this.vw, this.vh);
 
@@ -566,7 +616,7 @@ export class IsoRenderer {
     // deze getallen rechtstreeks in plaats van worldToScreen per punt.
     this._proj = {
       cx: this.cam.x, cy: this.cam.y,
-      kx: this.cosA * z, ky: this.sinA * this.tilt * z,
+      cos: this.cosA, sin: this.sinA, z, tiltZ: this.tilt * z,
       ox: this.vw / 2, oy: this.vh / 2,
     };
 
@@ -580,6 +630,7 @@ export class IsoRenderer {
     // Lijnen, straatnamen, haltes, bussen
     this.tekenLijnen(ctx, b);
     if (this._zichtbareTegels) this.tekenStraatnamen(ctx, this._zichtbareTegels);
+    this.tekenPlaatsen(ctx);
     this.tekenHaltes(ctx);
     this.tekenVoertuigen(ctx);
   }
@@ -615,9 +666,16 @@ export class IsoRenderer {
         this.tekenLijn(ctx, el.pts, breedte >= 10 ? c.streetMajor : c.street,
                        Math.max(1.2, breedte * z * 0.9));
       }
+      // Op de grove niveaus staan er geen panden in de tegel maar
+      // samengevatte blokken. Die als gebouw overeind zetten geeft een
+      // schaakbord; plat meelopen met de ondergrond leest als een stadsvlek
+      // tussen het water, het groen en de wegen.
+      const plat = t.niveau <= 2;
+      if (plat) ctx.fillStyle = c.bebouwing;
       for (const el of t.buildings) {
         if (this.buitenBeeld(el, bounds)) continue;
-        this.tekenGebouw(ctx, el);
+        if (plat) this.tekenVlak(ctx, el.pts, c.bebouwing);
+        else this.tekenGebouw(ctx, el);
       }
     }
   }
@@ -685,6 +743,76 @@ export class IsoRenderer {
     }
   }
 
+  /** De plaatsnamen die de kaart mag tonen. */
+  setPlaatsen(plaatsen) {
+    // Grootste eerst: die krijgen voorrang als er te weinig ruimte is
+    this.plaatsen = [...(plaatsen || [])].sort((a, b) => b.inwoners - a.inwoners);
+  }
+
+  /**
+   * Plaatsnamen op de kaart. Ze verschijnen waar je de contouren van het
+   * land herkent en verdwijnen zodra de straatnamen het overnemen; hoe
+   * verder je uitzoomt, hoe groter een plaats moet zijn om erbij te staan.
+   */
+  tekenPlaatsen(ctx) {
+    const z = this.cam.zoom;
+    if (!this.plaatsen?.length || z > PLAATS_TOT) return;
+
+    // Ondergrens aan inwonertal, zodat het nooit een woordenbrij wordt
+    const minInwoners = z < 0.008 ? 120000
+      : z < 0.02 ? 50000
+      : z < 0.05 ? 20000
+      : z < 0.15 ? 8000 : 0;
+
+    const c = this.colors;
+    const alpha = Math.min(1, (PLAATS_TOT - z) / (PLAATS_TOT * 0.25));
+    const bezet = [];
+    let getekend = 0;
+
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.lineJoin = 'round';
+
+    for (const plaats of this.plaatsen) {
+      if (getekend >= 60) break;
+      if (plaats.inwoners < minInwoners) continue;
+
+      const p = this.worldToScreen(plaats.x, plaats.y);
+      if (p.x < 30 || p.x > this.vw - 30 || p.y < 16 || p.y > this.vh - 16) continue;
+
+      // Grote steden groter, maar het verschil blijft bescheiden
+      const grootte = plaats.inwoners > 150000 ? 14 : plaats.inwoners > 40000 ? 12 : 10.5;
+      ctx.font = `600 ${grootte}px ${this.labelFont || 'system-ui, sans-serif'}`;
+      const halfB = ctx.measureText(plaats.naam).width / 2 + 7;
+      const halfH = grootte * 0.85;
+
+      let vrij = true;
+      for (const b of bezet) {
+        if (Math.abs(p.x - b.x) < halfB + b.hb && Math.abs(p.y - b.y) < halfH + b.hh) {
+          vrij = false;
+          break;
+        }
+      }
+      if (!vrij) continue;
+      bezet.push({ x: p.x, y: p.y, hb: halfB, hh: halfH });
+      getekend++;
+
+      ctx.globalAlpha = alpha;
+      // Stipje op de plek zelf, naam er iets boven
+      ctx.fillStyle = c.text;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, grootte > 12 ? 2.6 : 2, 0, TAU);
+      ctx.fill();
+
+      ctx.lineWidth = 3.5;
+      ctx.strokeStyle = c.bg;
+      ctx.strokeText(plaats.naam, p.x, p.y - grootte);
+      ctx.fillStyle = c.text;
+      ctx.fillText(plaats.naam, p.x, p.y - grootte);
+    }
+    ctx.globalAlpha = 1;
+  }
+
   buitenBeeld(el, bounds) {
     return el.maxX < bounds.minX || el.minX > bounds.maxX ||
            el.maxY < bounds.minY || el.minY > bounds.maxY;
@@ -697,11 +825,11 @@ export class IsoRenderer {
     const p = this._proj;
     ctx.beginPath();
     let dx = pts[0] - p.cx, dy = pts[1] - p.cy;
-    ctx.moveTo((dx - dy) * p.kx + p.ox, (dx + dy) * p.ky + p.oy);
+    ctx.moveTo((dx * p.cos - dy * p.sin) * p.z + p.ox, (dx * p.sin + dy * p.cos) * p.tiltZ + p.oy);
     for (let i = 2; i < n; i += 2) {
       dx = pts[i] - p.cx;
       dy = pts[i + 1] - p.cy;
-      ctx.lineTo((dx - dy) * p.kx + p.ox, (dx + dy) * p.ky + p.oy);
+      ctx.lineTo((dx * p.cos - dy * p.sin) * p.z + p.ox, (dx * p.sin + dy * p.cos) * p.tiltZ + p.oy);
     }
     ctx.closePath();
     ctx.fillStyle = fill;
@@ -717,11 +845,11 @@ export class IsoRenderer {
     ctx.lineWidth = breedte;
     ctx.beginPath();
     let dx = pts[0] - p.cx, dy = pts[1] - p.cy;
-    ctx.moveTo((dx - dy) * p.kx + p.ox, (dx + dy) * p.ky + p.oy);
+    ctx.moveTo((dx * p.cos - dy * p.sin) * p.z + p.ox, (dx * p.sin + dy * p.cos) * p.tiltZ + p.oy);
     for (let i = 2; i < n; i += 2) {
       dx = pts[i] - p.cx;
       dy = pts[i + 1] - p.cy;
-      ctx.lineTo((dx - dy) * p.kx + p.ox, (dx + dy) * p.ky + p.oy);
+      ctx.lineTo((dx * p.cos - dy * p.sin) * p.z + p.ox, (dx * p.sin + dy * p.cos) * p.tiltZ + p.oy);
     }
     ctx.stroke();
   }
@@ -743,8 +871,8 @@ export class IsoRenderer {
     for (let i = 0; i < n; i++) {
       const dx = pts[i * 2] - p.cx;
       const dy = pts[i * 2 + 1] - p.cy;
-      sx[i] = (dx - dy) * p.kx + p.ox;
-      sy[i] = (dx + dy) * p.ky + p.oy;
+      sx[i] = (dx * p.cos - dy * p.sin) * p.z + p.ox;
+      sy[i] = (dx * p.sin + dy * p.cos) * p.tiltZ + p.oy;
     }
 
     // Windingsrichting op het scherm: daarmee weten we welke zijvlakken
@@ -800,7 +928,7 @@ export class IsoRenderer {
     };
   }
 
-  drawPolyline(ctx, pts, color, width) {
+  drawPolyline(ctx, pts, color, width, stap = 1) {
     if (pts.length < 2) return;
     ctx.strokeStyle = color;
     ctx.lineWidth = width;
@@ -809,9 +937,13 @@ export class IsoRenderer {
     ctx.beginPath();
     const p0 = this.worldToScreen(pts[0][0], pts[0][1]);
     ctx.moveTo(p0.x, p0.y);
-    for (let i = 1; i < pts.length; i++) {
+    for (let i = stap; i < pts.length; i += stap) {
       const p = this.worldToScreen(pts[i][0], pts[i][1]);
       ctx.lineTo(p.x, p.y);
+    }
+    if ((pts.length - 1) % stap !== 0) {
+      const laatste = this.worldToScreen(pts[pts.length - 1][0], pts[pts.length - 1][1]);
+      ctx.lineTo(laatste.x, laatste.y);
     }
     ctx.stroke();
   }
@@ -823,6 +955,16 @@ export class IsoRenderer {
     ctx.lineJoin = 'round';
 
     const gefilterd = this.filteredLines.size > 0;
+
+    // Ver uitgezoomd staan alle routes van het land tegelijk in beeld.
+    // Punten die op minder dan een beeldpunt van elkaar liggen hoeven we
+    // niet te tekenen, en korte stadslijntjes zijn dan toch een veeg.
+    const stap = Math.max(1, Math.floor(0.35 / z));
+    // Hoe verder uit, hoe strenger: op landsbreedte wil je het regionale
+    // net zien, niet elk stadslijntje van drie kilometer.
+    const minLengte = z < 0.05 ? 40000 : z < 0.25 ? 15000 : 0;
+    // De brede onderlaag is daar toch niet te onderscheiden van de kern
+    const metCasing = z >= 0.25;
 
     // Eerst alle gedempte lijnen, dan de uitgelichte er bovenop
     for (const laag of [0, 1]) {
@@ -836,12 +978,16 @@ export class IsoRenderer {
         const casing = dim ? 0.05 : 0.16;
         const kern = dim ? 0.10 : (gefilterd ? 0.85 : 0.45);
 
+        if (minLengte && (r.lengte || 0) < minLengte) continue;
+
         for (const seg of r._segmenten) {
           const b = seg.b;
           if (b.maxX < bounds.minX || b.minX > bounds.maxX ||
               b.maxY < bounds.minY || b.minY > bounds.maxY) continue;
-          this.drawPolyline(ctx, seg.pts, kleurMetAlpha(kleur, casing), Math.max(4, 9 * z));
-          this.drawPolyline(ctx, seg.pts, kleurMetAlpha(kleur, kern), Math.max(1.2, 2.4 * z));
+          if (metCasing) {
+            this.drawPolyline(ctx, seg.pts, kleurMetAlpha(kleur, casing), Math.max(4, 9 * z), stap);
+          }
+          this.drawPolyline(ctx, seg.pts, kleurMetAlpha(kleur, kern), Math.max(1.2, 2.4 * z), stap);
         }
       }
     }
@@ -900,6 +1046,29 @@ export class IsoRenderer {
     }
     zichtbaar.sort((a, b) => a.p.y - b.p.y);
 
+    if (z < STIP_ZOOM) {
+      // Ver uitgezoomd: alleen nog een stip per bus, gegroepeerd per kleur
+      // zodat we niet per voertuig de tekenstijl hoeven om te zetten.
+      const perKleur = new Map();
+      for (const { v, p } of zichtbaar) {
+        const kleur = v._route?.kleur || this.colors.route;
+        const lijst = perKleur.get(kleur);
+        if (lijst) lijst.push(p);
+        else perKleur.set(kleur, [p]);
+      }
+      const straal = Math.max(1.6, 2.6 * Math.min(1, z / STIP_ZOOM + 0.4));
+      for (const [kleur, punten] of perKleur) {
+        ctx.fillStyle = kleur;
+        ctx.beginPath();
+        for (const p of punten) {
+          ctx.moveTo(p.x + straal, p.y);
+          ctx.arc(p.x, p.y, straal, 0, TAU);
+        }
+        ctx.fill();
+      }
+      return;
+    }
+
     for (const { v, p, hoek } of zichtbaar) {
       const route = v._route;
       const kleur = route?.kleur || this.colors.route;
@@ -916,8 +1085,9 @@ export class IsoRenderer {
    */
   schermHoek(wereldHoek) {
     if (wereldHoek === null || wereldHoek === undefined) return 0;
-    const dx = (Math.cos(wereldHoek) - Math.sin(wereldHoek)) * this.cosA;
-    const dy = (Math.cos(wereldHoek) + Math.sin(wereldHoek)) * this.sinA * this.tilt;
+    const wx = Math.cos(wereldHoek), wy = Math.sin(wereldHoek);
+    const dx = wx * this.cosA - wy * this.sinA;
+    const dy = (wx * this.sinA + wy * this.cosA) * this.tilt;
     return Math.atan2(dy, dx);
   }
 
@@ -1084,6 +1254,14 @@ export class IsoRenderer {
         this.hoveredVehicle = null;
         this.onHoverChange?.(null);
       }
+    });
+
+    canvas.addEventListener('dblclick', (e) => {
+      // Waar je dubbelklikt wil je heen; de camera glijdt er zelf naartoe
+      const doel = this.screenToWorld(e.clientX, e.clientY);
+      const zoom = Math.min(6, this.cam.zoom * 2.4);
+      this.setCenter(doel.x, doel.y, zoom);
+      this.onDubbelklik?.(doel, zoom);
     });
 
     canvas.addEventListener('wheel', (e) => {

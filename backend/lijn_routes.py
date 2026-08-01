@@ -32,15 +32,16 @@ OUT_PATH = os.path.join(DATA_DIR, "lijnen.json")
 # Landelijk nulpunt — moet gelijk zijn aan tegels.py CENTER_NL, anders
 # liggen de lijnen niet op de kaart.
 CENTER = {"lon": 5.4, "lat": 52.15}
-BBOX = [53.18, 6.50, 53.28, 6.62]  # min_lat, min_lon, max_lat, max_lon
-AGENCIES = {"QBUZZ"}
+# Standaard heel Nederland; met --gebied groningen kan het ook klein blijven
+BBOX = [50.70, 3.30, 53.60, 7.30]  # min_lat, min_lon, max_lat, max_lon
+AGENCIES = None                    # None = alle vervoerders
 
 # Standaardkleur voor lijnen zonder eigen route_color
 DEFAULT_KLEUR = "#8aa0b2"
 
-# Vereenvoudiging van de polyline (meter). Onder ~2m ziet niemand het verschil,
-# maar het scheelt de helft van de bestandsgrootte.
-SIMPLIFY_EPS = 2.0
+# Vereenvoudiging van de polyline (meter). Onder een paar meter ziet niemand
+# het verschil, en landelijk scheelt het tientallen procenten.
+SIMPLIFY_EPS = 4.0
 
 
 def latlon_to_meters(lat, lon):
@@ -95,7 +96,7 @@ def lees_routes(zf):
     routes = {}
     with zf.open("routes.txt") as f:
         for row in csv.DictReader(io.TextIOWrapper(f, encoding="utf-8")):
-            if row.get("agency_id", "") not in AGENCIES:
+            if AGENCIES and row.get("agency_id", "") not in AGENCIES:
                 continue
             kleur = (row.get("route_color") or "").strip()
             routes[row["route_id"]] = {
@@ -103,7 +104,7 @@ def lees_routes(zf):
                 "naam": row.get("route_long_name", "").strip(),
                 "kleur": f"#{kleur}" if len(kleur) == 6 else DEFAULT_KLEUR,
             }
-    log.info("  %d routes van %s", len(routes), "/".join(sorted(AGENCIES)))
+    log.info("  %d routes van %s", len(routes), "/".join(sorted(AGENCIES)) if AGENCIES else "alle vervoerders")
     return routes
 
 
@@ -301,17 +302,18 @@ def genereer():
         log.info("Shapes lezen (280 MB, dit duurt even)...")
         shapes = lees_shapes(zf, set(voorbeeld))
 
-        # Kies per lijn+richting de shape met de meeste ritten die door
-        # ons gebied loopt. Meerdere route_ids kunnen hetzelfde lijnnummer
-        # dragen (concessiewissels), die voegen we samen.
-        kandidaten = {}  # (lijn, richting) → dict
+        # Kies per route+richting de shape met de meeste ritten. Sleutelen
+        # op lijnnúmmer kan niet: lijn 1 bestaat in Groningen, Amsterdam,
+        # Rotterdam en Den Haag, en die zouden dan samenvallen tot één vorm.
+        # Alleen het route_id is landelijk uniek.
+        kandidaten = {}  # (route_id, richting) → dict
         for (route_id, richting, shape_id), aantal in tellingen.items():
             if shape_id not in shapes:
                 continue
             r = routes[route_id]
             if not r["lijn"]:
                 continue
-            sleutel = (r["lijn"], richting)
+            sleutel = (route_id, richting)
             huidig = kandidaten.get(sleutel)
             if huidig is None:
                 huidig = kandidaten[sleutel] = {
@@ -354,6 +356,11 @@ def genereer():
         "center": CENTER,
         "lijnen": lijnen,
     }
+    # `cum` laten we weg: de frontend rekent die in een paar milliseconden
+    # zelf uit de punten, en het scheelt een derde van het bestand.
+    for r in lijnen:
+        r.pop("cum", None)
+
     with open(OUT_PATH, "w", encoding="utf-8") as f:
         json.dump(uitvoer, f, separators=(",", ":"), ensure_ascii=False)
 

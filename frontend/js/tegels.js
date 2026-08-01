@@ -109,7 +109,7 @@ export class TegelBron {
     this.maxGelijktijdig = opties.maxGelijktijdig || 6;
     this.maxTegels = opties.maxTegels || 240;
     this.tintenAantal = opties.tintenAantal || 6;
-    this.labelVanaf = opties.labelVanaf ?? 3;   // vanaf dit niveau zijn er straatnamen
+    this.labelVanaf = opties.labelVanaf ?? 4;   // vanaf dit niveau zijn er straatnamen
     this.opGeladen = null;        // callback voor de renderer
     this.statistiek = { geladen: 0, bytes: 0, mislukt: 0 };
   }
@@ -130,9 +130,13 @@ export class TegelBron {
     return this.index?.center || null;
   }
 
-  /** Grofste niveau is 0; hoe verder ingezoomd, hoe hoger het niveau. */
+  /**
+   * Grofste niveau is 0; hoe verder ingezoomd, hoe hoger het niveau.
+   * Zes niveaus, dus vijf grenzen. De laagste hoort bij het atlasniveau,
+   * waarop heel Nederland in beeld past.
+   */
   niveauVoor(detail) {
-    const drempels = [0.18, 0.35, 0.7, 1.3];
+    const drempels = [0.055, 0.18, 0.35, 0.7, 1.3];
     let niveau = 0;
     for (const d of drempels) {
       if (detail >= d) niveau++;

@@ -46,6 +46,7 @@ let tegelBron = null;
 let vehicles = [];
 let activeLines = new Map();   // lijn → {bestemming, count, kleur}
 let lijnKleuren = new Map();   // lijn → kleur uit de GTFS
+let lijnenGeladen = null;      // belofte: de lijnenlaag is binnen
 
 async function loadMap() {
   try {
@@ -64,19 +65,25 @@ async function loadMap() {
   }
 
   // Lijnroutes: geometrie, kleuren en haltes per lijn en richting.
-  try {
-    const resp = await fetch('/data/lijnen.json');
-    if (resp.ok) {
+  // Landelijk is dit 12 MB, dus we wachten er niet op: de kaart komt eerst
+  // in beeld en de lijnen schuiven er even later onder.
+  lijnenGeladen = (async () => {
+    try {
+      const resp = await fetch('/data/lijnen.json');
+      if (!resp.ok) return;
       const data = await resp.json();
       renderer.setLijnen(data.lijnen || []);
       for (const r of data.lijnen || []) {
         if (!lijnKleuren.has(r.lijn)) lijnKleuren.set(r.lijn, r.kleur);
       }
       console.log(`${(data.lijnen || []).length} lijnroutes geladen`);
+      // Voertuigen die al binnen waren alsnog aan hun route koppelen
+      if (vehicles.length) renderer.setVehicles(vehicles, null);
+      updateLijnFilter();
+    } catch (err) {
+      console.warn('Lijnroutes laden mislukt:', err);
     }
-  } catch (err) {
-    console.warn('Lijnroutes laden mislukt:', err);
-  }
+  })();
 
   bootProgress(55, 'Voertuigen laden…');
 }
@@ -221,7 +228,77 @@ const OPENING = {
   beginZoom: 0.75,
   eindZoom: 3.2,
 };
-let openingBezig = false;
+let vluchtBezig = false;
+
+/** Zacht op gang, zacht uitlopend. */
+function soepel(t) {
+  return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+}
+
+/**
+ * Naar een plek toe vliegen: onderweg uitzoomen en aan het eind weer
+ * inzakken. Zonder die dip veeg je bij een verre stad op volle zoom over
+ * het land en zie je alleen een waas voorbijkomen.
+ *
+ * Zoomen gaat in logaritmische ruimte — halverwege tussen 1 en 4 hoort 2 te
+ * zijn, niet 2,5 — met daar bovenop een parabool die op de helft van de
+ * reis zijn diepste punt heeft.
+ */
+// Verder dan dit overvliegen we niet meer; dan gaan we er boven hangen
+const VLIEGGRENS = 15000;   // meter
+
+function vliegNaar(doel, eindZoom, duur) {
+  const van = { x: renderer.cam.x, y: renderer.cam.y, zoom: renderer.cam.zoom };
+  const afstand = Math.hypot(doel.x - van.x, doel.y - van.y);
+
+  let dip = 0;
+  let tijd = duur;
+
+  if (afstand > VLIEGGRENS) {
+    // Te ver om zinnig over te vliegen: bij 20 km heb je zoomstand 0,08
+    // nodig om het traject in beeld te krijgen, en dat staat de kaart niet
+    // toe. In plaats daarvan meteen boven de bestemming gaan hangen en
+    // daarop inzakken — dat leest als aankomen in plaats van als een waas.
+    van.x = doel.x;
+    van.y = doel.y;
+    van.zoom = Math.min(van.zoom, 0.85);
+    renderer.cam.x = renderer.targetCam.x = van.x;
+    renderer.cam.y = renderer.targetCam.y = van.y;
+    renderer.cam.zoom = renderer.targetCam.zoom = van.zoom;
+    tijd = tijd ?? 2400;
+  } else {
+    // Dichtbij: echt overvliegen, met een uitzoomdip die meegroeit met de
+    // afstand. Ver genoeg om overzicht te geven, niet zo ver dat een
+    // buurtsprongetje het hele land laat zien.
+    const uitfactor = Math.max(1, Math.min(4, 1 + afstand / 5000));
+    const laagste = Math.max(0.4, Math.min(van.zoom, eindZoom) / uitfactor);
+    dip = Math.log(laagste) - (Math.log(van.zoom) + Math.log(eindZoom)) / 2;
+    tijd = tijd ?? Math.max(1100, Math.min(2600, 900 + afstand / 12));
+  }
+
+  const logVan = Math.log(van.zoom);
+  const logNaar = Math.log(eindZoom);
+
+  vluchtBezig = true;
+  const begin = performance.now();
+
+  function stap(nu) {
+    if (!vluchtBezig) return;
+    const t = Math.min(1, (nu - begin) / tijd);
+    const e = soepel(t);
+
+    // Zoomen in logaritmische ruimte: halverwege tussen 1 en 4 hoort 2 te
+    // zijn, niet 2,5. De parabool erbovenop is de dip onderweg.
+    const logZoom = logVan + (logNaar - logVan) * e + 4 * dip * t * (1 - t);
+    renderer.cam.x = renderer.targetCam.x = van.x + (doel.x - van.x) * e;
+    renderer.cam.y = renderer.targetCam.y = van.y + (doel.y - van.y) * e;
+    renderer.cam.zoom = renderer.targetCam.zoom = Math.exp(logZoom);
+
+    if (t < 1) requestAnimationFrame(stap);
+    else vluchtBezig = false;
+  }
+  requestAnimationFrame(stap);
+}
 
 /** Het busstation zoeken tussen de haltes; anders het stadscentrum. */
 function openingsDoel() {
@@ -240,37 +317,19 @@ function startOpening() {
   const doel = openingsDoel();
   if (!stad || !doel) return;
 
-  // Meteen boven Groningen staan, daarna pas bewegen
+  // Meteen boven Groningen staan, daarna pas bewegen. De afstand is klein,
+  // dus de dip valt vanzelf weg: dit is een pure inzoombeweging.
   renderer.cam.x = renderer.targetCam.x = stad.x;
   renderer.cam.y = renderer.targetCam.y = stad.y;
   renderer.cam.zoom = renderer.targetCam.zoom = OPENING.beginZoom;
 
-  openingBezig = true;
-  const begin = performance.now();
-  const van = { x: stad.x, y: stad.y, zoom: OPENING.beginZoom };
-
-  function stap(nu) {
-    if (!openingBezig) return;
-    const t = Math.min(1, (nu - begin) / OPENING.duur);
-    // Zacht op gang en zacht uitlopend
-    const e = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
-
-    // Zoomen gaat logaritmisch, anders lijkt het eind veel sneller te gaan
-    const zoom = van.zoom * Math.pow(OPENING.eindZoom / van.zoom, e);
-    renderer.cam.x = renderer.targetCam.x = van.x + (doel.x - van.x) * e;
-    renderer.cam.y = renderer.targetCam.y = van.y + (doel.y - van.y) * e;
-    renderer.cam.zoom = renderer.targetCam.zoom = zoom;
-
-    if (t < 1) requestAnimationFrame(stap);
-    else openingBezig = false;
-  }
-  requestAnimationFrame(stap);
+  vliegNaar(doel, OPENING.eindZoom, OPENING.duur);
 }
 
 /** Zodra iemand zelf de kaart aanraakt is de opening voorbij. */
 function stopOpening() {
-  if (!openingBezig) return;
-  openingBezig = false;
+  if (!vluchtBezig) return;
+  vluchtBezig = false;
   renderer.targetCam.x = renderer.cam.x;
   renderer.targetCam.y = renderer.cam.y;
   renderer.targetCam.zoom = renderer.cam.zoom;
@@ -298,6 +357,7 @@ async function laadPlaatsen() {
     const resp = await fetch('/data/steden.json');
     if (!resp.ok) return;
     plaatsen = (await resp.json()).plaatsen || [];
+    renderer.setPlaatsen(plaatsen);
     console.log(`${plaatsen.length} plaatsen geladen`);
   } catch (err) {
     console.warn('Plaatsen laden mislukt:', err);
@@ -418,11 +478,10 @@ function gaNaar(plaats) {
 
   const druk = druksteplek(plaats);
   if (druk) {
-    // Op de bussen inzoomen is zinvol alleen als je ze ook ziet rijden
-    renderer.setCenter(druk.x, druk.y, Math.max(plaats.zoom || 2, 3.0));
+    vliegNaar(druk, Math.max(plaats.zoom || 2, 3.0));
     console.log(`${plaats.naam}: ${druk.aantal} bussen op de drukste plek`);
   } else {
-    renderer.setCenter(plaats.x, plaats.y, plaats.zoom || 2);
+    vliegNaar(plaats, plaats.zoom || 2);
   }
   sluitSteden();
 }
@@ -674,13 +733,13 @@ function toonHoek(tilt) {
   kantelHoek.textContent = `${Math.round(Math.asin(tilt) * 180 / Math.PI)}°`;
 }
 
-kantelSlider.value = renderer.tilt;
-toonHoek(renderer.tilt);
+kantelSlider.value = renderer.tiltVoorkeur;
+toonHoek(renderer.tiltVoorkeur);
 
 kantelSlider.addEventListener('input', () => {
   const tilt = parseFloat(kantelSlider.value);
   renderer.setTilt(tilt);
-  toonHoek(renderer.tilt);
+  toonHoek(renderer.tiltVoorkeur);
 });
 
 // ---------------------------------------------------------------------------
@@ -724,6 +783,7 @@ async function start() {
   bootProgress(95, 'Klaar…');
 
   renderLoop();
+  await lijnenGeladen;   // de opening mikt op het busstation, dus haltes nodig
   startOpening();
   setInterval(() => pollVehicles(), 20000);
 

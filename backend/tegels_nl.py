@@ -244,7 +244,7 @@ def stap1(pbf_pad, werk_map):
 # Stap 2: tegels schrijven per niveau
 # ---------------------------------------------------------------------------
 
-def stap2(werk_map, uit_map):
+def stap2(werk_map, uit_map, alleen=None):
     """Tegels schrijven per niveau, telkens uit de tijdelijke bestanden.
 
     Elk niveau leest de ruwe stukken opnieuw. Dat is meer leeswerk dan
@@ -269,6 +269,8 @@ def stap2(werk_map, uit_map):
     totaal_bytes = 0
 
     for niveau in range(len(NIVEAUS)):
+        if alleen is not None and niveau not in alleen:
+            continue
         grootte = NIVEAUS[niveau]
         detail = DETAIL[niveau]
         eps = detail["eps"]
@@ -341,6 +343,17 @@ def stap2(werk_map, uit_map):
         log.info("  niveau %d (%d m): %d tegels in %.0f s", niveau, grootte,
                  geschreven, time.time() - begin)
 
+    if alleen is not None:
+        # Deelherbouw: de index van de bestaande tegels aanvullen in plaats
+        # van weggooien, anders verdwijnen de niveaus die we oversloegen.
+        bestaand_pad = os.path.join(uit_map, "index.json")
+        if os.path.exists(bestaand_pad):
+            with open(bestaand_pad, "r", encoding="utf-8") as f:
+                bestaand = json.load(f)
+            for niveau, lijst in bestaand.get("tegels", {}).items():
+                if int(niveau) not in alleen:
+                    index["tegels"][niveau] = lijst
+
     vakken = index["tegels"][str(FIJNSTE)]
     g = NIVEAUS[FIJNSTE]
     index["bereik"] = {
@@ -369,6 +382,7 @@ def main():
     p.add_argument("--uit", default=os.path.join(DATA_DIR, "tegels"))
     p.add_argument("--stap", choices=["1", "2", "beide"], default="beide")
     p.add_argument("--bewaar-werk", action="store_true", help="tijdelijke bestanden niet wissen")
+    p.add_argument("--alleen", help="alleen deze niveaus herbouwen, bijv. 0,1")
     args = p.parse_args()
 
     if args.stap in ("1", "beide"):
@@ -381,9 +395,13 @@ def main():
         stap1(args.pbf, args.werk)
 
     if args.stap in ("2", "beide"):
-        if os.path.exists(args.uit):
+        alleen = {int(n) for n in args.alleen.split(",")} if args.alleen else None
+        if os.path.exists(args.uit) and alleen is None:
             shutil.rmtree(args.uit)
-        stap2(args.werk, args.uit)
+        elif alleen:
+            for niveau in alleen:
+                shutil.rmtree(os.path.join(args.uit, str(niveau)), ignore_errors=True)
+        stap2(args.werk, args.uit, alleen)
         if not args.bewaar_werk:
             shutil.rmtree(args.werk, ignore_errors=True)
             log.info("Tijdelijke bestanden opgeruimd")

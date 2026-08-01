@@ -49,7 +49,7 @@ TEGEL_DIR = os.path.join(DATA_DIR, "tegels")
 CENTER_NL = {"lon": 5.4, "lat": 52.15}
 
 # Tegelgrootte per niveau, in meters. Niveau 0 is het verst uitgezoomd.
-NIVEAUS = [32768, 16384, 8192, 4096, 2048]
+NIVEAUS = [65536, 32768, 16384, 8192, 4096, 2048]
 EENHEDEN = 32768  # int16-bereik dat één tegel beslaat
 
 SOORTEN = {"water": 0, "green": 1, "streets": 2, "buildings": 3}
@@ -67,10 +67,14 @@ SOORTEN = {"water": 0, "green": 1, "streets": 2, "buildings": 3}
 # blijven. Per cel van `cel` meter komt er één blok als minstens `dekking`
 # van die cel bebouwd is.
 DETAIL = [
+    # Atlasniveau: het hele land in beeld. Alleen de kust, de grote wateren,
+    # het snelwegennet en de steden als vlek.
+    {"omvang": 8000, "weg": 14, "gebouwen": False, "eps": 12.0,
+     "bebouwing": {"cel": 1024, "dekking": 0.04}},
     {"omvang": 2500, "weg": 14, "gebouwen": False, "eps": 4.0,
-     "bebouwing": {"cel": 512, "dekking": 0.06}},
+     "bebouwing": {"cel": 256, "dekking": 0.05}},
     {"omvang": 1200, "weg": 12, "gebouwen": False, "eps": 2.0,
-     "bebouwing": {"cel": 256, "dekking": 0.06}},
+     "bebouwing": {"cel": 128, "dekking": 0.05}},
     {"omvang": 400,  "weg": 8,  "gebouwen": True,  "gebouw_omvang": 25, "eps": 1.0},
     {"omvang": 100,  "weg": 5,  "gebouwen": True,  "gebouw_omvang": 20, "eps": 0.5},
     {"omvang": 0,    "weg": 0,  "gebouwen": True,  "gebouw_omvang": 0,  "eps": 0.25},
@@ -299,26 +303,60 @@ class Tegelbouwer:
         return len(self.tegels), totaal_bytes
 
 def bebouwingsblokken(cellen, cel, dekking):
-    """Zet opgetelde bebouwing per rastercel om in blokjes.
+    """Zet opgetelde bebouwing per rastercel om in stadsvlekken.
 
-    Elke cel die genoeg bebouwd is levert één vierkant met de gemiddelde
-    hoogte van de panden erin. Het vierkant is iets kleiner dan de cel,
-    zodat je bij het uitzoomen blokken ziet en geen dichtgesmeerd vlak.
+    Cellen die genoeg bebouwd zijn worden per rij aan elkaar geplakt, zodat
+    een aaneengesloten wijk één langgerekt vlak wordt in plaats van een rij
+    losse vierkanten. Ver uitgezoomd is een cel al gauw zestig beeldpunten
+    breed, en dan valt zo'n raster meteen op.
+
+    Dunbebouwde cellen krijgen wel een eigen, kleiner vierkantje: dat leest
+    als verspreide bebouwing en niet als een dorpskern.
     """
     drempel = cel * cel * dekking
-    blokken = []
-    inzet = cel * 0.08
+    vol_drempel = cel * cel * 0.18      # hierboven noemen we een cel dichtbebouwd
+
+    dicht = {}
+    los = []
     for (cx, cy), (oppervlak, hoogte_som, aantal) in cellen.items():
         if oppervlak < drempel:
             continue
-        x0, y0 = cx * cel + inzet, cy * cel + inzet
-        x1, y1 = (cx + 1) * cel - inzet, (cy + 1) * cel - inzet
-        # Hoe voller de cel, hoe hoger het blok mag ogen
-        gemiddeld = hoogte_som / max(aantal, 1)
-        vulling = min(1.0, oppervlak / (cel * cel))
-        hoogte = max(6.0, min(45.0, gemiddeld * (0.7 + vulling)))
-        blokken.append(([[x0, y0], [x1, y0], [x1, y1], [x0, y1]], int(hoogte * 10)))
-    return blokken
+        hoogte = hoogte_som / max(aantal, 1)
+        if oppervlak >= vol_drempel:
+            dicht[(cx, cy)] = hoogte
+        else:
+            vulling = max(0.0, min(1.0, oppervlak / (cel * cel)))
+            zijde = cel * (0.35 + 0.55 * math.sqrt(vulling))
+            marge = (cel - zijde) / 2
+            x0, y0 = cx * cel + marge, cy * cel + marge
+            los.append(([[x0, y0], [x0 + zijde, y0],
+                         [x0 + zijde, y0 + zijde], [x0, y0 + zijde]],
+                        int(max(6.0, min(45.0, hoogte)) * 10)))
+
+    # Dichtbebouwde cellen per rij samenvoegen tot één vlak
+    blokken = []
+    per_rij = defaultdict(list)
+    for (cx, cy) in dicht:
+        per_rij[cy].append(cx)
+
+    for cy, kolommen in per_rij.items():
+        kolommen.sort()
+        begin = vorige = kolommen[0]
+        for cx in kolommen[1:] + [None]:
+            if cx == vorige + 1:
+                vorige = cx
+                continue
+            x0, y0 = begin * cel, cy * cel
+            x1, y1 = (vorige + 1) * cel, (cy + 1) * cel
+            hoogtes = [dicht[(k, cy)] for k in range(begin, vorige + 1)]
+            hoogte = sum(hoogtes) / len(hoogtes)
+            blokken.append(([[x0, y0], [x1, y0], [x1, y1], [x0, y1]],
+                            int(max(6.0, min(45.0, hoogte)) * 10)))
+            if cx is None:
+                break
+            begin = vorige = cx
+
+    return blokken + los
 
 
 def tel_bebouwing(cellen, pts, hoogte_m, cel):

@@ -31,9 +31,9 @@ DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data"
 # Op welke niveaus schrijven we namen, en vanaf welke straatlengte?
 # Ver uitgezoomd alleen de doorgaande wegen, ingezoomd ook de zijstraatjes.
 LABELNIVEAUS = {
-    3: {"min_lengte": 400, "soorten": {"motorway", "trunk", "primary", "secondary", "tertiary"},
+    4: {"min_lengte": 400, "soorten": {"motorway", "trunk", "primary", "secondary", "tertiary"},
         "tussenruimte": 2500, "max_per_naam": 2},
-    4: {"min_lengte": 80,  "soorten": None,    # None = alle straten met een naam
+    5: {"min_lengte": 80,  "soorten": None,    # None = alle straten met een naam
         "tussenruimte": 450, "max_per_naam": 4},
 }
 OVERSLAAN = {"footway", "cycleway", "path", "steps", "track", "pedestrian", "corridor",
