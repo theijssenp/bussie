@@ -72,6 +72,7 @@ def init_db(conn):
         CREATE INDEX IF NOT EXISTS idx_lijn_richting ON vehicle_positions(lijn, richting);
         CREATE INDEX IF NOT EXISTS idx_vehicle ON vehicle_positions(vehicle_id);
         CREATE INDEX IF NOT EXISTS idx_ts ON vehicle_positions(timestamp);
+        CREATE INDEX IF NOT EXISTS idx_stored_at ON vehicle_positions(stored_at);
         
         -- Laatste bekende positie per voertuig (eigen datalaag)
         CREATE TABLE IF NOT EXISTS latest_vehicles (

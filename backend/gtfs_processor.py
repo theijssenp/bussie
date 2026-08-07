@@ -19,6 +19,16 @@ from socketserver import ThreadingMixIn
 
 from google.transit import gtfs_realtime_pb2
 from trace_db import get_db, store_positions, generate_route_traces, get_all_traces, get_trace_stats, ruim_op
+import trace_db as _tdb_module
+# _trace_db is één sqlite3-connectie die zowel de pollthread (schrijft elke 20s)
+# als alle HTTP-requestthreads (ThreadingMixIn, dus lezen tegelijk) delen.
+# De meeste trace_db-functies (store_positions, generate_route_traces,
+# get_all_traces, get_trace_stats) vergrendelen zichzelf al met dit lock-object
+# — DB_LOCK hier nogmaals gebruiken om zo'n aanroep zou zelfvergrendeling
+# opleveren (Lock is niet reentrant). Alleen de plekken die nog geen eigen
+# bescherming hadden (ruim_op, de rauwe .execute() in /api/voertuigen/db)
+# krijgen 'm hieronder expliciet.
+DB_LOCK = _tdb_module._db_lock
 
 # ---------------------------------------------------------------------------
 # Config
@@ -305,7 +315,8 @@ def poll_loop():
         # Ongeveer één keer per uur de oude posities opruimen
         if rondes % 180 == 1:
             try:
-                ruim_op(_trace_db)
+                with DB_LOCK:
+                    ruim_op(_trace_db)
             except Exception as e:
                 log.warning("Opruimen mislukt: %s", e)
         feed = fetch_realtime()
@@ -326,9 +337,19 @@ def poll_loop():
                 
                 # Sla posities op in trace database
                 if _trace_db and all_vehicles:
-                    stored = store_positions(_trace_db, all_vehicles)
-                    if stored > 0:
-                        log.debug("  %d posities opgeslagen in trace db", stored)
+                    try:
+                        # store_positions vergrendelt zelf al (_db_lock in
+                        # trace_db.py) — hier nog eens DB_LOCK pakken zou
+                        # met hetzelfde (niet-reentrant) lock-object
+                        # onherroepelijk vastlopen.
+                        stored = store_positions(_trace_db, all_vehicles)
+                        if stored > 0:
+                            log.debug("  %d posities opgeslagen in trace db", stored)
+                    except Exception as e:
+                        # Een SQLite-hik (bv. gelijktijdige /api/traces/regenerate)
+                        # mag deze thread niet fataal worden — anders blijft de
+                        # kaart draaien op bevroren data zonder dat iets het merkt.
+                        log.warning("Wegschrijven posities mislukt: %s", e)
 
         # 20 seconden — eigen tempo, data wordt via SQLite geserveerd
         time.sleep(20)
@@ -438,6 +459,7 @@ class BussieHandler(BaseHTTPRequestHandler):
 
         if path == "/api/traces":
             # Alle gegenereerde route traces
+            # (get_all_traces vergrendelt zelf al via _db_lock)
             import trace_db as tdb
             if tdb._trace_db:
                 traces = get_all_traces(tdb._trace_db)
@@ -448,6 +470,7 @@ class BussieHandler(BaseHTTPRequestHandler):
 
         if path == "/api/traces/stats":
             # Database statistieken
+            # (get_trace_stats vergrendelt zelf al via _db_lock)
             import trace_db as tdb
             if tdb._trace_db:
                 stats = get_trace_stats(tdb._trace_db)
@@ -458,6 +481,7 @@ class BussieHandler(BaseHTTPRequestHandler):
 
         if path == "/api/traces/regenerate":
             # Handmatig route traces regenereren
+            # (generate_route_traces vergrendelt zelf al via _db_lock)
             import trace_db as tdb
             if tdb._trace_db:
                 count = generate_route_traces(tdb._trace_db)
@@ -483,39 +507,54 @@ class BussieHandler(BaseHTTPRequestHandler):
                 this_mod = sys.modules.get('__main__')
                 data_ts = getattr(this_mod, '_last_feed_ts', 0)
 
-                if history:
-                    # Laad 2 laatste posities per voertuig voor vloeiende start
-                    # Alleen voertuigen die in de laatste 5 minuten zijn bijgewerkt
-                    cutoff = int(time.time()) - 300
-                    cursor = tdb._trace_db.execute("""
-                        SELECT vehicle_id, trip_id, route_id, lijn, richting, bestemming,
-                               lat, lon, status, bearing, speed, lbl, timestamp
-                        FROM latest_vehicles
-                        WHERE lijn IS NOT NULL AND lijn != ''
-                          AND timestamp >= ?
-                        ORDER BY lijn
-                    """, (cutoff,))
-                    vehicles = []
-                    for r in cursor.fetchall():
-                        vehicles.append({
+                try:
+                    with DB_LOCK:
+                        cutoff = int(time.time()) - 300
+                        cursor = tdb._trace_db.execute("""
+                            SELECT vehicle_id, trip_id, route_id, lijn, richting, bestemming,
+                                   lat, lon, status, bearing, speed, lbl, timestamp
+                            FROM latest_vehicles
+                            WHERE lijn IS NOT NULL AND lijn != ''
+                              AND timestamp >= ?
+                            ORDER BY lijn
+                        """, (cutoff,))
+                        vehicles = [{
                             "id": r[0], "tid": r[1], "rid": r[2], "lijn": r[3],
                             "richting": r[4], "bestemming": r[5],
                             "lat": r[6], "lon": r[7], "st": r[8],
                             "bearing": r[9], "snelheid": r[10], "lbl": r[11], "t": r[12],
-                        })
-                    # Haal voor elk voertuig ook de 1-na-laatste positie op
+                        } for r in cursor.fetchall()]
+
+                        if history:
+                            # Haal voor elk voertuig ook de 1-na-laatste positie op.
+                            # MATERIALIZED dwingt SQLite om eerst op stored_at te
+                            # filteren (via idx_stored_at) en pas daarna de
+                            # window-functie te draaien — zonder die hint plant
+                            # de query planner het andersom en scant hij alsnog
+                            # de hele (honderden MB's grote) tabel.
+                            prev = {}
+                            cursor2 = tdb._trace_db.execute("""
+                                WITH recent AS MATERIALIZED (
+                                    SELECT vehicle_id, lat, lon, timestamp, stored_at
+                                    FROM vehicle_positions
+                                    WHERE stored_at >= ?
+                                )
+                                SELECT vehicle_id, lat, lon, timestamp
+                                FROM (
+                                    SELECT vehicle_id, lat, lon, timestamp,
+                                           ROW_NUMBER() OVER (PARTITION BY vehicle_id ORDER BY stored_at DESC) as rn
+                                    FROM recent
+                                )
+                                WHERE rn = 2
+                            """, (cutoff,))
+                            for row in cursor2:
+                                prev[row[0]] = {"lat": row[1], "lon": row[2], "t": row[3]}
+                except Exception as e:
+                    log.warning("Lezen uit trace db mislukt: %s", e)
+                    vehicles = []
                     prev = {}
-                    cursor2 = tdb._trace_db.execute("""
-                        SELECT vehicle_id, lat, lon, timestamp
-                        FROM (
-                            SELECT vehicle_id, lat, lon, timestamp,
-                                   ROW_NUMBER() OVER (PARTITION BY vehicle_id ORDER BY stored_at DESC) as rn
-                            FROM vehicle_positions
-                        )
-                        WHERE rn = 2
-                    """)
-                    for row in cursor2:
-                        prev[row[0]] = {"lat": row[1], "lon": row[2], "t": row[3]}
+
+                if history:
                     self._send_json({
                         "v": 2,
                         "ts": int(time.time()),
@@ -524,23 +563,6 @@ class BussieHandler(BaseHTTPRequestHandler):
                         "historie": prev,
                     }, cache="public, max-age=30")
                 else:
-                    cutoff = int(time.time()) - 300
-                    cursor = tdb._trace_db.execute("""
-                        SELECT vehicle_id, trip_id, route_id, lijn, richting, bestemming,
-                               lat, lon, status, bearing, speed, lbl, timestamp
-                        FROM latest_vehicles
-                        WHERE lijn IS NOT NULL AND lijn != ''
-                          AND timestamp >= ?
-                        ORDER BY lijn
-                    """, (cutoff,))
-                    vehicles = []
-                    for r in cursor.fetchall():
-                        vehicles.append({
-                            "id": r[0], "tid": r[1], "rid": r[2], "lijn": r[3],
-                            "richting": r[4], "bestemming": r[5],
-                            "lat": r[6], "lon": r[7], "st": r[8],
-                            "bearing": r[9], "snelheid": r[10], "lbl": r[11], "t": r[12],
-                        })
                     self._send_json({
                         "v": 1,
                         "ts": int(time.time()),
