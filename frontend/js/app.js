@@ -92,6 +92,13 @@ function kleurVan(lijn) {
   return lijnKleuren.get(lijn) || '#8aa0b2';
 }
 
+/** Staat dit voertuig binnen het momenteel zichtbare stuk kaart? */
+function binnenBeeld(v) {
+  if (v._wx === undefined) return false;
+  const b = renderer.viewportBounds();
+  return v._wx >= b.minX && v._wx <= b.maxX && v._wy >= b.minY && v._wy <= b.maxY;
+}
+
 // ---------------------------------------------------------------------------
 // Realtime polling
 // ---------------------------------------------------------------------------
@@ -117,6 +124,7 @@ async function pollVehicles(initial) {
 
     activeLines.clear();
     for (const v of vehicles) {
+      if (!binnenBeeld(v)) continue;
       const lijn = v.lijn || '?';
       if (!activeLines.has(lijn)) {
         activeLines.set(lijn, { bestemming: v.bestemming || '', count: 0, kleur: kleurVan(lijn) });
@@ -580,6 +588,7 @@ function updateBusoverzicht() {
   const perLijn = new Map();
   for (const v of vehicles) {
     if (!renderer.zichtbaar(v.lijn)) continue;
+    if (!binnenBeeld(v)) continue;
     const lijn = v.lijn || '?';
     if (!perLijn.has(lijn)) perLijn.set(lijn, { bestemming: v.bestemming || '', bussen: [] });
     perLijn.get(lijn).bussen.push(v);
@@ -587,6 +596,11 @@ function updateBusoverzicht() {
 
   const lijnen = gesorteerdeLijnen(perLijn.entries());
   const totaal = lijnen.reduce((n, [, info]) => n + info.bussen.length, 0);
+
+  if (totaal === 0) {
+    busoverzichtDiv.innerHTML = '<div class="header">Geen bussen in beeld</div>';
+    return;
+  }
 
   let html = `<div class="header">Bussen <span class="aantal">${totaal} · ${lijnen.length} lijnen</span></div>`;
 
@@ -789,6 +803,9 @@ async function start() {
 
   // De zijbalk toont afstanden tot de volgende halte — die lopen mee.
   setInterval(() => { if (overzichtOpen) updateBusoverzicht(); }, 5000);
+  // Beide overzichten zijn gefilterd op het zichtbare kaartgebied, dat
+  // verandert door pannen/zoomen zonder dat er nieuwe voertuigdata is.
+  setInterval(() => { if (lijnFilterOpen) updateLijnFilter(); }, 5000);
 
   hideBoot();
 }
