@@ -136,7 +136,7 @@ export class TegelBron {
    * waarop heel Nederland in beeld past.
    */
   niveauVoor(detail) {
-    const drempels = [0.055, 0.18, 0.35, 0.7, 1.3];
+    const drempels = [0.02, 0.06, 0.12, 0.7, 1.3];
     let niveau = 0;
     for (const d of drempels) {
       if (detail >= d) niveau++;
