@@ -34,9 +34,10 @@ def get_db():
     Slaat ook op als module-level singleton voor HTTP handlers."""
     global _trace_db
     os.makedirs(DATA_DIR, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA busy_timeout=30000")
     init_db(conn)
     _trace_db = conn
     return conn
@@ -248,81 +249,92 @@ def latlon_to_meters(lat, lon, center_lat, center_lon):
 def generate_route_traces(conn, center_lat=53.2265, center_lon=6.563, min_points=5):
     """
     Genereer route polylines per lijn + richting uit de verzamelde GPS data.
-    
+
     Strategie:
     1. Haal per voertuig alle GPS punten op (een voertuigtrace = één rit)
     2. Vereenvoudig elke individuele trace met Douglas-Peucker
     3. Voeg traces samen door ruimtelijke overlap te vinden
     4. Het resultaat is een samengevoegde route polyline per lijn/richting
     """
-    # Haal alle unieke lijn/richting combinaties op met genoeg data
-    cursor = conn.execute("""
-        SELECT lijn, richting, COUNT(*) as cnt
-        FROM vehicle_positions 
-        WHERE lijn IS NOT NULL AND lijn != ''
-        GROUP BY lijn, richting
-        HAVING cnt >= ?
-        ORDER BY lijn
-    """, (min_points,))
-    
-    combinations = cursor.fetchall()
-    log.info("Route traces genereren voor %d lijn/richting combinaties", len(combinations))
-    
-    generated = 0
-    for lijn, richting, cnt in combinations:
-        # Haal alle GPS punten voor deze lijn/richting, gesorteerd op tijd
-        cursor2 = conn.execute("""
-            SELECT lat, lon, timestamp, vehicle_id
+    # Gebruik een aparte verbinding met busy_timeout om database lock conflicten te voorkomen
+    import contextlib
+    gen_conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=60)
+    gen_conn.execute("PRAGMA journal_mode=WAL")
+    gen_conn.execute("PRAGMA synchronous=NORMAL")
+    gen_conn.execute("PRAGMA busy_timeout=60000")
+
+    try:
+        # Haal alle unieke lijn/richting combinaties op met genoeg data
+        cursor = gen_conn.execute("""
+            SELECT lijn, richting, COUNT(*) as cnt
             FROM vehicle_positions
-            WHERE lijn = ? AND (richting = ? OR (? IS NULL AND richting IS NULL))
-            ORDER BY timestamp ASC
-        """, (lijn, richting, richting))
-        
-        # Groepeer per voertuig (elke trace is een afzonderlijke rit)
-        vehicle_traces = defaultdict(list)
-        for lat, lon, ts, vid in cursor2:
-            vehicle_traces[vid].append((lat, lon, ts))
-        
-        if not vehicle_traces:
-            continue
-        
-        # Converteer elke trace naar meters en vereenvoudig
-        simplified_traces = []
-        for vid, trace in sorted(vehicle_traces.items(), key=lambda x: -len(x[1])):
-            if len(trace) < 2:
+            WHERE lijn IS NOT NULL AND lijn != ''
+            GROUP BY lijn, richting
+            HAVING cnt >= ?
+            ORDER BY lijn
+        """, (min_points,))
+
+        combinations = cursor.fetchall()
+        log.info("Route traces genereren voor %d lijn/richting combinaties", len(combinations))
+
+        generated = 0
+        for lijn, richting, cnt in combinations:
+            # Haal alle GPS punten voor deze lijn/richting, gesorteerd op tijd
+            cursor2 = gen_conn.execute("""
+                SELECT lat, lon, timestamp, vehicle_id
+                FROM vehicle_positions
+                WHERE lijn = ? AND (richting = ? OR (? IS NULL AND richting IS NULL))
+                ORDER BY timestamp ASC
+            """, (lijn, richting, richting))
+
+            # Groepeer per voertuig (elke trace is een afzonderlijke rit)
+            vehicle_traces = defaultdict(list)
+            for lat, lon, ts, vid in cursor2.fetchall():
+                vehicle_traces[vid].append((lat, lon, ts))
+
+            if not vehicle_traces:
                 continue
-            # Converteer naar meters
-            meters = [latlon_to_meters(lat, lon, center_lat, center_lon) for lat, lon, _ in trace]
-            # Vereenvoudig met Douglas-Peucker (epsilon = 20m)
-            simplified = douglas_peucker(meters, 20.0)
-            if len(simplified) >= 2:
-                simplified_traces.append(simplified)
-        
-        if not simplified_traces:
-            continue
-        
-        # Voeg traces samen: gebruik de langste trace als basis,
-        # en voeg punten uit andere traces toe die verder dan 30m van
-        # de bestaande route liggen
-        merged = merge_traces(simplified_traces)
-        
-        if len(merged) < 2:
-            continue
-        
-        # Sla op in database
-        pts_json = json.dumps(merged)
-        conn.execute("""
-            INSERT OR REPLACE INTO route_traces (lijn, richting, pts_json, point_count, generated_at)
-            VALUES (?, ?, ?, ?, ?)
-        """, (lijn, richting, pts_json, len(merged), int(time.time())))
-        
-        generated += 1
-        log.info("  Lijn %s richting %s: %d traces → %d punten (samengevoegd)", 
-                 lijn, richting, len(simplified_traces), len(merged))
-    
-    conn.commit()
-    log.info("Totaal %d route traces gegenereerd", generated)
-    return generated
+
+            # Converteer elke trace naar meters en vereenvoudig
+            simplified_traces = []
+            for vid, trace in sorted(vehicle_traces.items(), key=lambda x: -len(x[1])):
+                if len(trace) < 2:
+                    continue
+                # Converteer naar meters
+                meters = [latlon_to_meters(lat, lon, center_lat, center_lon) for lat, lon, _ in trace]
+                # Vereenvoudig met Douglas-Peucker (epsilon = 20m)
+                simplified = douglas_peucker(meters, 20.0)
+                if len(simplified) >= 2:
+                    simplified_traces.append(simplified)
+
+            if not simplified_traces:
+                continue
+
+            # Voeg traces samen: gebruik de langste trace als basis,
+            # en voeg punten uit andere traces toe die verder dan 30m van
+            # de bestaande route liggen
+            merged = merge_traces(simplified_traces)
+
+            if len(merged) < 2:
+                continue
+
+            # Sla op in database — via _db_lock om conflict met store_positions te voorkomen
+            pts_json = json.dumps(merged)
+            with _db_lock:
+                gen_conn.execute("""
+                    INSERT OR REPLACE INTO route_traces (lijn, richting, pts_json, point_count, generated_at)
+                    VALUES (?, ?, ?, ?, ?)
+                """, (lijn, richting, pts_json, len(merged), int(time.time())))
+                gen_conn.commit()
+
+            generated += 1
+            log.info("  Lijn %s richting %s: %d traces → %d punten (samengevoegd)",
+                     lijn, richting, len(simplified_traces), len(merged))
+
+        log.info("Totaal %d route traces gegenereerd", generated)
+        return generated
+    finally:
+        gen_conn.close()
 
 
 def merge_traces(traces):

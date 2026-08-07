@@ -139,9 +139,48 @@ async function pollVehicles(initial) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Scheepvaart
+// ---------------------------------------------------------------------------
+
+let schepen = [];
+
+async function pollSchepen() {
+  try {
+    const resp = await fetch('/api/schepen');
+    if (!resp.ok) return;
+    const data = await resp.json();
+    schepen = data.schepen || [];
+    renderer.setSchepen(schepen);
+  } catch (err) {
+    console.warn('Schepen ophalen mislukt:', err);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Treinen
+// ---------------------------------------------------------------------------
+
+let treinen = [];
+
+async function pollTreinen() {
+  try {
+    const resp = await fetch('/api/treinen');
+    if (!resp.ok) return;
+    const data = await resp.json();
+    treinen = data.treinen || [];
+    renderer.setTreinen(treinen);
+  } catch (err) {
+    console.warn('Treinen ophalen mislukt:', err);
+  }
+}
+
 function updateStatusregel() {
+  const delen = [`${vehicles.length} bussen`];
+  if (treinen.length) delen.push(`${treinen.length} treinen`);
+  if (schepen.length) delen.push(`${schepen.length} schepen`);
   document.getElementById('laden').textContent =
-    `${vehicles.length} bussen live · bijgewerkt ${new Date().toLocaleTimeString('nl-NL')}`;
+    `${delen.join(' · ')} live · bijgewerkt ${new Date().toLocaleTimeString('nl-NL')}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -151,6 +190,8 @@ function updateStatusregel() {
 function renderLoop() {
   renderer.render();
   if (renderer.hoveredVehicle) volgPopup(renderer.hoveredVehicle);
+  else if (renderer.hoveredSchip) volgPopup(renderer.hoveredSchip);
+  else if (renderer.hoveredTrein) volgPopup(renderer.hoveredTrein);
   requestAnimationFrame(renderLoop);
 }
 
@@ -703,7 +744,107 @@ renderer.onHoverChange = (v) => {
   volgPopup(v);
 };
 
-/** De popup blijft aan de bus hangen terwijl die doorrijdt. */
+// Scheepssoorten netjes benoemd voor in de popup
+const SCHIP_NAMEN = {
+  passagier: 'Passagiersschip',
+  sneldienst: 'Sneldienst',
+  vracht: 'Vrachtschip',
+  tanker: 'Tanker',
+  sleepboot: 'Sleepboot',
+  visser: 'Vissersschip',
+  zeilboot: 'Zeilschip',
+  plezier: 'Plezierjacht',
+  overig: 'Onbekend type',
+};
+const SCHIP_KLEUREN = {
+  passagier: '#2f8fd0', sneldienst: '#2f8fd0', vracht: '#7d8a99',
+  tanker: '#9a6b5a', sleepboot: '#e08a3c', visser: '#5aa06e',
+  zeilboot: '#8fb0c4', plezier: '#8fb0c4', overig: '#93a3b0',
+};
+
+/** Kompasrichting in woorden: 20° wordt NNO. */
+function kompas(graden) {
+  if (graden === null || graden === undefined) return null;
+  const punten = ['N', 'NNO', 'NO', 'ONO', 'O', 'OZO', 'ZO', 'ZZO',
+                  'Z', 'ZZW', 'ZW', 'WZW', 'W', 'WNW', 'NW', 'NNW'];
+  return punten[Math.round(graden / 22.5) % 16];
+}
+
+renderer.onSchipHover = (schip) => {
+  if (!schip) {
+    if (!renderer.hoveredVehicle && !renderer.hoveredTrein) busInfoDiv.style.display = 'none';
+    return;
+  }
+
+  const kleur = SCHIP_KLEUREN[schip.soort] || SCHIP_KLEUREN.overig;
+  const naam = schip.naam || `MMSI ${schip.mmsi}`;
+  const knopen = schip.snelheid;
+  const snelheid = knopen === null || knopen === undefined
+    ? '—'
+    : `${knopen.toFixed(1)} kn · ${Math.round(knopen * 1.852)} km/u`;
+  const richting = schip.koers === null || schip.koers === undefined
+    ? '—'
+    : `${kompas(schip.koers)} · ${Math.round(schip.koers)}°`;
+  const ouderdom = Math.max(0, Math.round(Date.now() / 1000 - schip.t));
+  const gemeld = ouderdom < 60 ? `${ouderdom} s geleden` : `${Math.round(ouderdom / 60)} min geleden`;
+
+  busInfoDiv.innerHTML = `
+    <div class="kop">
+      <span class="lijn-badge" style="background:${kleur};color:${tekstKleur(kleur)}">⚓</span>
+      <span class="bestemming">${naam}</span>
+    </div>
+    ${schip.bestemming ? `<div class="veld volgende">Op weg naar<strong>${schip.bestemming}</strong></div>` : ''}
+    <div class="veld"><span>Soort</span><strong>${SCHIP_NAMEN[schip.soort] || SCHIP_NAMEN.overig}</strong></div>
+    <div class="veld"><span>Snelheid</span><strong>${snelheid}</strong></div>
+    <div class="veld"><span>Koers</span><strong>${richting}</strong></div>
+    ${schip.lengte ? `<div class="veld"><span>Lengte</span><strong>${schip.lengte} m</strong></div>` : ''}
+    <div class="veld zacht"><span>MMSI ${schip.mmsi}</span><span>${gemeld}</span></div>
+  `;
+  busInfoDiv.style.display = 'block';
+  volgPopup(schip);
+};
+
+// Treinsoorten netjes benoemd voor in de popup
+const TREIN_NAMEN = {
+  intercity: 'Intercity',
+  sprinter: 'Sprinter',
+  trein: 'Trein',
+};
+const TREIN_KLEUREN = {
+  intercity: '#003082',
+  sprinter: '#ffc917',
+  trein: '#5a6472',
+};
+
+renderer.onTreinHover = (trein) => {
+  if (!trein) {
+    if (!renderer.hoveredVehicle && !renderer.hoveredSchip) busInfoDiv.style.display = 'none';
+    return;
+  }
+
+  const kleur = TREIN_KLEUREN[trein.soort] || TREIN_KLEUREN.trein;
+  const kmu = trein.snelheid;
+  const snelheid = kmu === null || kmu === undefined ? '—' : `${Math.round(kmu)} km/u`;
+  const richting = trein.koers === null || trein.koers === undefined
+    ? '—'
+    : `${kompas(trein.koers)} · ${Math.round(trein.koers)}°`;
+  const ouderdom = Math.max(0, Math.round(Date.now() / 1000 - trein.t));
+  const gemeld = ouderdom < 60 ? `${ouderdom} s geleden` : `${Math.round(ouderdom / 60)} min geleden`;
+
+  busInfoDiv.innerHTML = `
+    <div class="kop">
+      <span class="lijn-badge" style="background:${kleur};color:${tekstKleur(kleur)}">${trein.nummer}</span>
+      <span class="bestemming">${TREIN_NAMEN[trein.soort] || TREIN_NAMEN.trein}</span>
+    </div>
+    <div class="veld"><span>Snelheid</span><strong>${snelheid}</strong></div>
+    <div class="veld"><span>Koers</span><strong>${richting}</strong></div>
+    <div class="veld zacht"><span>Trein ${trein.nummer}</span><span>${gemeld}</span></div>
+  `;
+  busInfoDiv.style.display = 'block';
+  volgPopup(trein);
+};
+
+/** De popup blijft aan de bus, het schip of de trein hangen terwijl die doorbeweegt. */
 function volgPopup(v) {
   if (busInfoDiv.style.display === 'none') return;
   const x = v._sx, y = v._sy;
@@ -800,6 +941,15 @@ async function start() {
   await lijnenGeladen;   // de opening mikt op het busstation, dus haltes nodig
   startOpening();
   setInterval(() => pollVehicles(), 20000);
+
+  // Schepen: eigen tempo, want die stroom loopt los van de GTFS-feed
+  pollSchepen();
+  setInterval(pollSchepen, 15000);
+
+  // Treinen: de backend pollt de NS API zelf maar eens per 30s, dus vaker
+  // navragen heeft geen zin — de frontend rekent tussendoor gewoon door.
+  pollTreinen();
+  setInterval(pollTreinen, 20000);
 
   // De zijbalk toont afstanden tot de volgende halte — die lopen mee.
   setInterval(() => { if (overzichtOpen) updateBusoverzicht(); }, 5000);

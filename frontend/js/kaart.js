@@ -27,6 +27,27 @@ const MAX_BUSKANTELING = Math.PI / 6;
 // de standaard okerkleur, want een grijs busje leest niet als een bus.
 const LIJN_STANDAARDKLEUR = '#8aa0b2';
 
+// Kleur per scheepssoort. Veerboten springen eruit — dat is wat je wilt zien
+const SCHIP_KLEUREN = {
+  passagier: '#2f8fd0',
+  sneldienst: '#2f8fd0',
+  vracht: '#7d8a99',
+  tanker: '#9a6b5a',
+  sleepboot: '#e08a3c',
+  visser: '#5aa06e',
+  zeilboot: '#8fb0c4',
+  plezier: '#8fb0c4',
+  overig: '#93a3b0',
+};
+const KNOOP = 0.5144;   // knoop → meter per seconde
+
+// Kleur per treinsoort — de vertrouwde NS-tinten, meteen herkenbaar
+const TREIN_KLEUREN = {
+  intercity: '#003082',
+  sprinter: '#ffc917',
+  trein: '#5a6472',
+};
+
 export class IsoRenderer {
   constructor(canvas) {
     this.canvas = canvas;
@@ -48,6 +69,10 @@ export class IsoRenderer {
     this.lastMouse = { x: 0, y: 0 };
     this.mouseWorld = null;
     this.hoveredVehicle = null;
+    this.hoveredSchip = null;
+    this.schepen = [];
+    this.hoveredTrein = null;
+    this.treinen = [];
 
     // Theme colors
     this.themes = {
@@ -466,6 +491,194 @@ export class IsoRenderer {
     }
   }
 
+  /**
+   * Scheepsposities uit de AIS-stroom. Schepen melden zich elke paar
+   * seconden, maar wij peilen minder vaak; daarom rekenen we tussendoor
+   * met koers en snelheid door (gegist bestek), net zolang tot er een
+   * nieuwe melding is.
+   */
+  setSchepen(schepen) {
+    const center = this.center;
+    if (!center) return;
+    const R = 6378137, n = Math.PI / 180, cosLat = Math.cos(center.lat * n);
+    const nu = Date.now() / 1000;
+
+    this.schepen = (schepen || []).map(s => ({
+      ...s,
+      _wx: (s.lon - center.lon) * n * R * cosLat,
+      _wy: -(s.lat - center.lat) * n * R,
+      _gezien: nu,
+    }));
+  }
+
+  /** Waar vaart dit schip nu, doorgerekend vanaf de laatste melding. */
+  positieVanSchip(schip) {
+    const verstreken = Math.min(90, Date.now() / 1000 - schip._gezien);
+    if (!schip.snelheid || schip.koers === null || schip.koers === undefined) {
+      return { x: schip._wx, y: schip._wy };
+    }
+    const afstand = schip.snelheid * KNOOP * verstreken;
+    const rad = schip.koers * Math.PI / 180;
+    // Koers is een kompaspeiling: 0 = noord, met de klok mee
+    return {
+      x: schip._wx + Math.sin(rad) * afstand,
+      y: schip._wy - Math.cos(rad) * afstand,
+    };
+  }
+
+  tekenSchepen(ctx) {
+    if (!this.schepen?.length) return;
+    const z = this.cam.zoom;
+    const schaal = Math.max(0.7, Math.min(2.2, 0.5 + z * 0.7));
+
+    const stippen = z < STIP_ZOOM;
+    const perKleur = new Map();
+
+    for (const schip of this.schepen) {
+      const pos = this.positieVanSchip(schip);
+      const p = this.worldToScreen(pos.x, pos.y);
+      if (p.x < -40 || p.x > this.vw + 40 || p.y < -40 || p.y > this.vh + 40) {
+        schip._sx = undefined;
+        continue;
+      }
+      schip._sx = p.x;
+      schip._sy = p.y;
+      const kleur = SCHIP_KLEUREN[schip.soort] || SCHIP_KLEUREN.overig;
+
+      if (stippen) {
+        const lijst = perKleur.get(kleur);
+        if (lijst) lijst.push(p);
+        else perKleur.set(kleur, [p]);
+        continue;
+      }
+      this.tekenSchip(ctx, p.x, p.y, schaal, this.schermHoek(koersNaarWereld(schip.koers)),
+                      kleur, schip.lengte);
+      if (this.hoveredSchip === schip) {
+        ctx.strokeStyle = this.colors.text;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 15 * schaal, 0, TAU);
+        ctx.stroke();
+      }
+    }
+
+    for (const [kleur, punten] of perKleur) {
+      ctx.fillStyle = kleur;
+      ctx.beginPath();
+      for (const p of punten) {
+        ctx.moveTo(p.x + 2, p.y);
+        ctx.arc(p.x, p.y, 2, 0, TAU);
+      }
+      ctx.fill();
+    }
+  }
+
+  /** Een romp met een punt aan de voorkant, gedraaid in de vaarrichting. */
+  tekenSchip(ctx, x, y, schaal, hoek, kleur, lengte) {
+    // Grote schepen mogen wat groter, maar het verschil blijft bescheiden
+    const l = (lengte && lengte > 120 ? 26 : lengte && lengte > 40 ? 20 : 15) * schaal;
+    const b = l * 0.34;
+
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(hoek);
+
+    ctx.fillStyle = this.colors.schaduw;
+    ctx.beginPath();
+    ctx.ellipse(0, b * 0.32, l * 0.5, b * 0.34, 0, 0, TAU);
+    ctx.fill();
+
+    ctx.fillStyle = kleur;
+    ctx.beginPath();
+    ctx.moveTo(l * 0.5, 0);            // boeg
+    ctx.lineTo(l * 0.12, -b / 2);
+    ctx.lineTo(-l * 0.5, -b / 2);      // spiegel
+    ctx.lineTo(-l * 0.5, b / 2);
+    ctx.lineTo(l * 0.12, b / 2);
+    ctx.closePath();
+    ctx.fill();
+
+    // Opbouw als klein blokje achterop
+    ctx.fillStyle = this.colors.busRuit;
+    ctx.fillRect(-l * 0.36, -b * 0.22, l * 0.22, b * 0.44);
+
+    ctx.restore();
+  }
+
+  /**
+   * Treinposities uit de NS Virtual Train API. Net als bij de schepen: de
+   * backend pollt maar eens per 30s, dus tussendoor rekenen we met koers en
+   * snelheid door (gegist bestek) zodat een trein niet 30 seconden stilstaat.
+   */
+  setTreinen(treinen) {
+    const center = this.center;
+    if (!center) return;
+    const R = 6378137, n = Math.PI / 180, cosLat = Math.cos(center.lat * n);
+    const nu = Date.now() / 1000;
+
+    this.treinen = (treinen || []).map(t => ({
+      ...t,
+      _wx: (t.lon - center.lon) * n * R * cosLat,
+      _wy: -(t.lat - center.lat) * n * R,
+      _gezien: nu,
+    }));
+  }
+
+  /** Waar rijdt deze trein nu, doorgerekend vanaf de laatste melding. */
+  positieVanTrein(trein) {
+    const verstreken = Math.min(45, Date.now() / 1000 - trein._gezien);
+    if (!trein.snelheid || trein.koers === null || trein.koers === undefined) {
+      return { x: trein._wx, y: trein._wy };
+    }
+    const afstand = (trein.snelheid / 3.6) * verstreken;   // km/u → m/s
+    const rad = trein.koers * Math.PI / 180;
+    // Koers is een kompaspeiling: 0 = noord, met de klok mee
+    return {
+      x: trein._wx + Math.sin(rad) * afstand,
+      y: trein._wy - Math.cos(rad) * afstand,
+    };
+  }
+
+  tekenTreinen(ctx) {
+    if (!this.treinen?.length) return;
+    const z = this.cam.zoom;
+    const schaal = Math.max(0.85, Math.min(2.0, 0.55 + z * 0.55));
+
+    const stippen = z < STIP_ZOOM;
+    const perKleur = new Map();
+
+    for (const trein of this.treinen) {
+      const pos = this.positieVanTrein(trein);
+      const p = this.worldToScreen(pos.x, pos.y);
+      if (p.x < -50 || p.x > this.vw + 50 || p.y < -50 || p.y > this.vh + 50) {
+        trein._sx = undefined;
+        continue;
+      }
+      trein._sx = p.x;
+      trein._sy = p.y;
+      const kleur = TREIN_KLEUREN[trein.soort] || TREIN_KLEUREN.trein;
+
+      if (stippen) {
+        const lijst = perKleur.get(kleur);
+        if (lijst) lijst.push(p);
+        else perKleur.set(kleur, [p]);
+        continue;
+      }
+      this.tekenTrein(ctx, p.x, p.y, schaal, this.schermHoek(koersNaarWereld(trein.koers)),
+                       this.hoveredTrein === trein, kleur);
+    }
+
+    for (const [kleur, punten] of perKleur) {
+      ctx.fillStyle = kleur;
+      ctx.beginPath();
+      for (const p of punten) {
+        ctx.moveTo(p.x + 2.2, p.y);
+        ctx.arc(p.x, p.y, 2.2, 0, TAU);
+      }
+      ctx.fill();
+    }
+  }
+
   setLineFilter(lines) {
     this.filteredLines = new Set(lines);
   }
@@ -632,6 +845,8 @@ export class IsoRenderer {
     if (this._zichtbareTegels) this.tekenStraatnamen(ctx, this._zichtbareTegels);
     this.tekenPlaatsen(ctx);
     this.tekenHaltes(ctx);
+    this.tekenSchepen(ctx);
+    this.tekenTreinen(ctx);
     this.tekenVoertuigen(ctx);
   }
 
@@ -1207,6 +1422,115 @@ export class IsoRenderer {
     }
   }
 
+  /**
+   * Een trein: langer en lager dan een bus, met een spitse neus zodat de
+   * rijrichting ook zonder kleur meteen leesbaar is — dezelfde truc als bij
+   * de schepen. Verder hergebruikt dit de bus-kleurafleiding: eigen lijnkleur
+   * blijft dus net zo goed werken.
+   */
+  tekenTrein(ctx, x, y, schaal, hoek, geselecteerd, kleur) {
+    const c = this.colors;
+    const trein = this.busKleuren(kleur);
+    const w = 42 * schaal;
+    const h = 9 * schaal;
+    const neus = w * 0.16;
+    const r = 2.4 * schaal;
+
+    ctx.save();
+    ctx.translate(x, y);
+
+    const spiegel = Math.cos(hoek) < 0;
+    let draai = spiegel ? (hoek > 0 ? hoek - Math.PI : hoek + Math.PI) : hoek;
+    draai = Math.max(-MAX_BUSKANTELING, Math.min(MAX_BUSKANTELING, draai));
+    ctx.rotate(draai);
+    if (spiegel) ctx.scale(-1, 1);
+
+    // Schaduw op de grond
+    ctx.fillStyle = c.schaduw;
+    ctx.beginPath();
+    ctx.ellipse(0, h * 0.16, w * 0.5, h * 0.3, 0, 0, TAU);
+    ctx.fill();
+
+    ctx.translate(-w / 2, -h);
+
+    // Bogies: bij een trein zitten de wielen vrijwel onder de bak verstopt,
+    // dus twee subtiele donkere balkjes in plaats van ronde buswielen.
+    ctx.fillStyle = trein.wiel;
+    const bogieW = w * 0.14, bogieH = 1.6 * schaal;
+    ctx.fillRect(w * 0.18, h - bogieH * 0.4, bogieW, bogieH);
+    ctx.fillRect(w * 0.68, h - bogieH * 0.4, bogieW, bogieH);
+
+    // Carrosserie: een rechthoekige bak met een spitse neus vooraan (rechts,
+    // vóór het spiegelen) — leest als een treinstel in plaats van een blokje.
+    ctx.fillStyle = trein.body;
+    ctx.beginPath();
+    ctx.moveTo(r, 0);
+    ctx.lineTo(w - neus, 0);
+    ctx.lineTo(w, h * 0.5);
+    ctx.lineTo(w - neus, h);
+    ctx.lineTo(r, h);
+    ctx.arcTo(0, h, 0, h - r, r);
+    ctx.lineTo(0, r);
+    ctx.arcTo(0, 0, r, 0, r);
+    ctx.closePath();
+    ctx.fill();
+
+    // Daklijn
+    ctx.fillStyle = trein.dak;
+    afgerondeRechthoek(ctx, 0, 0, w - neus * 0.6, h * 0.3, r * 0.8);
+    ctx.fill();
+
+    // Pantograaf: een klein streepje op het dak, ietwat naar achteren —
+    // klein detail maar meteen herkenbaar als trein.
+    ctx.strokeStyle = trein.rand;
+    ctx.lineWidth = Math.max(0.5, 0.45 * schaal);
+    ctx.beginPath();
+    ctx.moveTo(w * 0.38, 0);
+    ctx.lineTo(w * 0.42, -h * 0.22);
+    ctx.lineTo(w * 0.5, -h * 0.22);
+    ctx.lineTo(w * 0.54, 0);
+    ctx.stroke();
+
+    // Ramenstrook: één doorlopende band i.p.v. losse busramen, licht
+    // onderverdeeld zodat het als treinstel met meerdere bakken leest.
+    ctx.fillStyle = trein.ruit;
+    afgerondeRechthoek(ctx, w * 0.05, h * 0.32, w - neus - w * 0.1, h * 0.32, 1 * schaal);
+    ctx.fill();
+    ctx.strokeStyle = c.bg;
+    ctx.lineWidth = Math.max(0.5, 0.4 * schaal);
+    for (const frac of [0.36, 0.62]) {
+      ctx.beginPath();
+      ctx.moveTo(w * frac, h * 0.32);
+      ctx.lineTo(w * frac, h * 0.64);
+      ctx.stroke();
+    }
+
+    // Randje voor definitie
+    ctx.strokeStyle = trein.rand;
+    ctx.lineWidth = Math.max(0.6, 0.5 * schaal);
+    ctx.beginPath();
+    ctx.moveTo(r, 0);
+    ctx.lineTo(w - neus, 0);
+    ctx.lineTo(w, h * 0.5);
+    ctx.lineTo(w - neus, h);
+    ctx.lineTo(r, h);
+    ctx.arcTo(0, h, 0, h - r, r);
+    ctx.lineTo(0, r);
+    ctx.arcTo(0, 0, r, 0, r);
+    ctx.closePath();
+    ctx.stroke();
+
+    ctx.restore();
+
+    if (geselecteerd) {
+      ctx.strokeStyle = c.text;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(x, y - h * 0.4, w * 0.56, 0, TAU);
+      ctx.stroke();
+    }
+  }
+
   /** Lijnnummer als klein bordje boven de bus, in de kleur van de lijn. */
   tekenLijnLabel(ctx, x, y, schaal, lijn, kleur) {
     if (!lijn) return;
@@ -1259,6 +1583,14 @@ export class IsoRenderer {
       if (this.hoveredVehicle) {
         this.hoveredVehicle = null;
         this.onHoverChange?.(null);
+      }
+      if (this.hoveredSchip) {
+        this.hoveredSchip = null;
+        this.onSchipHover?.(null);
+      }
+      if (this.hoveredTrein) {
+        this.hoveredTrein = null;
+        this.onTreinHover?.(null);
       }
     });
 
@@ -1332,19 +1664,52 @@ export class IsoRenderer {
   checkHover(sx, sy) {
     // Meebewegen met hoe groot de busjes op dit zoomniveau getekend worden
     const raakAfstand = Math.max(18, 13 * (this._busSchaal || 1) + 6);
-    let beste = null, besteAfstand = Infinity;
+    let bus = null, schip = null, trein = null, besteAfstand = Infinity;
+
     for (const v of this.vehicles) {
       if (v._sx === undefined) continue;
       if (!this.zichtbaar(v.lijn)) continue;
       const d = Math.hypot(sx - v._sx, sy - (v._sy - 6));
       if (d < raakAfstand && d < besteAfstand) {
         besteAfstand = d;
-        beste = v;
+        bus = v;
       }
     }
-    if (beste !== this.hoveredVehicle) {
-      this.hoveredVehicle = beste;
-      this.onHoverChange?.(beste);
+
+    // Ligt er een schip dichterbij, dan wint dat
+    for (const s of this.schepen || []) {
+      if (s._sx === undefined) continue;
+      const d = Math.hypot(sx - s._sx, sy - s._sy);
+      if (d < raakAfstand && d < besteAfstand) {
+        besteAfstand = d;
+        schip = s;
+        bus = null;
+      }
+    }
+
+    // En een trein wint weer van een schip
+    for (const t of this.treinen || []) {
+      if (t._sx === undefined) continue;
+      const d = Math.hypot(sx - t._sx, sy - t._sy);
+      if (d < raakAfstand && d < besteAfstand) {
+        besteAfstand = d;
+        trein = t;
+        bus = null;
+        schip = null;
+      }
+    }
+
+    if (bus !== this.hoveredVehicle) {
+      this.hoveredVehicle = bus;
+      this.onHoverChange?.(bus);
+    }
+    if (schip !== this.hoveredSchip) {
+      this.hoveredSchip = schip;
+      this.onSchipHover?.(schip);
+    }
+    if (trein !== this.hoveredTrein) {
+      this.hoveredTrein = trein;
+      this.onTreinHover?.(trein);
     }
   }
 }
@@ -1407,6 +1772,12 @@ function verschuifKleur(basis, tint) {
 function rgbNaarString(rgb) {
   const k = (v) => Math.max(0, Math.min(255, Math.round(v)));
   return `rgb(${k(rgb[0])},${k(rgb[1])},${k(rgb[2])})`;
+}
+
+/** Kompaspeiling (0 = noord, met de klok mee) naar een wereldhoek. */
+function koersNaarWereld(koers) {
+  if (koers === null || koers === undefined) return null;
+  return (koers - 90) * Math.PI / 180;
 }
 
 function boundsVan(pts) {

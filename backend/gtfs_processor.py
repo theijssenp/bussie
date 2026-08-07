@@ -29,6 +29,8 @@ import trace_db as _tdb_module
 # bescherming hadden (ruim_op, de rauwe .execute() in /api/voertuigen/db)
 # krijgen 'm hieronder expliciet.
 DB_LOCK = _tdb_module._db_lock
+from schepen import Scheepvaart
+from ns_trein import Treinen
 
 # ---------------------------------------------------------------------------
 # Config
@@ -64,6 +66,11 @@ TRIP_CACHE = {}    # trip_id → {route_id, trip_headsign, direction_id}
 # Laatst opgehaalde realtime data per stad
 REALTIME_CACHE = {}  # city → {v, ts, vehicles: [...]}
 REALTIME_LOCK = threading.Lock()
+
+# AIS-scheepvaart (eigen achtergronddraad met een websocket)
+SCHEEPVAART = None
+# NS-treinposities (eigen achtergronddraad, elke 30s gepolld)
+TREINEN = None
 
 logging.basicConfig(
     level=logging.INFO,
@@ -418,6 +425,38 @@ class BussieHandler(BaseHTTPRequestHandler):
             self._send_json(data)
             return
 
+        if path == "/api/schepen":
+            if SCHEEPVAART is None:
+                self._send_json({"v": 1, "schepen": [], "uit": True}, cache="no-store")
+                return
+            self._send_json({
+                "v": 1,
+                "ts": int(time.time()),
+                "schepen": SCHEEPVAART.momentopname(),
+            }, cache="public, max-age=10")
+            return
+
+        if path == "/api/schepen/status":
+            self._send_json(SCHEEPVAART.status() if SCHEEPVAART else {"uit": True},
+                            cache="no-store")
+            return
+
+        if path == "/api/treinen":
+            if TREINEN is None:
+                self._send_json({"v": 1, "treinen": [], "uit": True}, cache="no-store")
+                return
+            self._send_json({
+                "v": 1,
+                "ts": int(time.time()),
+                "treinen": TREINEN.momentopname(),
+            }, cache="public, max-age=10")
+            return
+
+        if path == "/api/treinen/status":
+            self._send_json(TREINEN.status() if TREINEN else {"uit": True},
+                            cache="no-store")
+            return
+
         if path == "/api/steden":
             steden = []
             for city, cfg in CITIES.items():
@@ -691,6 +730,24 @@ def main():
     # Start poll loop in achtergrond
     poll_thread = threading.Thread(target=poll_loop, daemon=True)
     poll_thread.start()
+
+    # Scheepvaart via AIS; zonder sleutel blijft dit gewoon uit
+    global SCHEEPVAART
+    try:
+        vaart = Scheepvaart()
+        if vaart.start():
+            SCHEEPVAART = vaart
+    except Exception as e:
+        log.warning("Scheepvaart niet gestart: %s", e)
+
+    # Treinen via de NS Virtual Train API; zonder sleutel blijft dit uit
+    global TREINEN
+    try:
+        treinen = Treinen()
+        if treinen.start():
+            TREINEN = treinen
+    except Exception as e:
+        log.warning("Treinen niet gestart: %s", e)
 
     # Start HTTP server
     server = ThreadedHTTPServer(("0.0.0.0", port), BussieHandler)
