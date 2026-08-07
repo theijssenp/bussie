@@ -1023,7 +1023,13 @@ export class IsoRenderer {
 
   tekenVoertuigen(ctx) {
     const z = this.cam.zoom;
-    const schaal = Math.max(0.75, Math.min(1.9, 0.55 + z * 0.55));
+    // Zodra de tegels echte gebouwen tonen (niveau 3+, zie DETAIL in
+    // tegels.py) ogen kleine stipjes verloren tussen de bebouwing: dan
+    // blijven het volwaardige bushokjes, met een hogere ondergrens.
+    const metGebouwen = this.tegelStand?.niveau >= 3;
+    const schaal = metGebouwen
+      ? Math.max(1.4, Math.min(1.9, 0.55 + z * 0.55))
+      : Math.max(0.75, Math.min(1.9, 0.55 + z * 0.55));
     this._busSchaal = schaal;
 
     // Van achter naar voren tekenen zodat bussen elkaar netjes overlappen
@@ -1046,7 +1052,7 @@ export class IsoRenderer {
     }
     zichtbaar.sort((a, b) => a.p.y - b.p.y);
 
-    if (z < STIP_ZOOM) {
+    if (z < STIP_ZOOM && !metGebouwen) {
       // Ver uitgezoomd: alleen nog een stip per bus, gegroepeerd per kleur
       // zodat we niet per voertuig de tekenstijl hoeven om te zetten.
       const perKleur = new Map();
