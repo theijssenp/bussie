@@ -49,9 +49,14 @@ WEGBREEDTE = {
 # Spoor waar echt treinverkeer overheen gaat. Trams en metro's laten we
 # eruit: die lopen door de stad heen en maken het spoornet onleesbaar.
 SPOOR = {"rail", "light_rail", "narrow_gauge"}
-# Rangeerterreinen en opstelsporen leveren een wirwar op bij elk station,
-# terwijl er geen reizigerstrein overheen komt.
-SPOOR_DIENST_UIT = {"yard", "siding", "spur", "crossover"}
+# Rangeerterreinen en fabrieksaansluitingen leveren een wirwar op zonder dat
+# er een reizigerstrein overheen komt. Perronsporen (siding) en de wissels
+# ertussen (crossover) horen er juist wél bij: daar staan de treinen die je
+# op de kaart ziet.
+SPOOR_DIENST_UIT = {"yard", "spur"}
+# Deze liggen op stations en zijn ondergeschikt aan de doorgaande baan; ze
+# worden dunner getekend zodat een station leesbaar blijft.
+SPOOR_BIJSPOOR = {"siding", "crossover"}
 GROEN_LEISURE = {"park", "garden", "playground"}
 GROEN_LANDUSE = {"grass", "meadow", "forest", "cemetery", "recreation_ground", "orchard", "allotments"}
 WATERWEGEN = {"river", "stream", "canal", "ditch"}
@@ -165,9 +170,11 @@ def classificeer(tags):
 
     rw = tags.get("railway")
     if rw in SPOOR:
-        if tags.get("service") in SPOOR_DIENST_UIT:
+        dienst = tags.get("service")
+        if dienst in SPOOR_DIENST_UIT:
             return None
-        return "rails", 0, False
+        # waarde 1 = bijspoor (perron, wissel), 0 = doorgaande baan
+        return "rails", 1 if dienst in SPOOR_BIJSPOOR else 0, False
 
     if tags.get("natural") == "water" or tags.get("landuse") in ("basin", "reservoir"):
         return "water", 0, True

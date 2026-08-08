@@ -126,6 +126,8 @@ export class IsoRenderer {
         buildingSide: '#b4b4b0',
         buildingLijn: 'rgba(43,48,56,0.06)',
         bebouwing: '#d3cec4',      // platte stadsvlek ver uitgezoomd
+        asfalt: '#565d69',         // wegdek onder de buslijnen
+        asfaltRand: '#3f4650',
         spoor: '#9aa3ad',          // spoorbed
         spoorBiels: '#f2f5f8',     // dwarsstreepjes erover
         station: '#1a4a86',        // treinstation: rand en naam
@@ -153,6 +155,8 @@ export class IsoRenderer {
         buildingSide: '#1c212c',
         buildingLijn: 'rgba(0,0,0,0.25)',
         bebouwing: '#212734',      // platte stadsvlek ver uitgezoomd
+        asfalt: '#2f3641',         // wegdek onder de buslijnen
+        asfaltRand: '#1c222b',
         spoor: '#4a5464',          // spoorbed
         spoorBiels: '#161b24',     // dwarsstreepjes erover
         station: '#7fb4d6',        // treinstation: rand en naam
@@ -1131,10 +1135,13 @@ export class IsoRenderer {
       // een grijze weg — en de treinen rijden er nu zichtbaar overheen.
       if (t.rails.length) {
         const spoorBreed = Math.max(1, Math.min(5, 1.5 * z));
+        // waarde 1 = bijspoor (perron, wissel): smaller dan de doorgaande
+        // baan, anders wordt een station één brede grijze vlek.
+        const breedteVan = (el) => el.waarde ? spoorBreed * 0.62 : spoorBreed;
         ctx.lineCap = 'butt';
         for (const el of t.rails) {
           if (this.buitenBeeld(el, bounds)) continue;
-          this.tekenLijn(ctx, el.pts, c.spoor, spoorBreed);
+          this.tekenLijn(ctx, el.pts, c.spoor, breedteVan(el));
         }
         // Dwarsliggers pas als je dichtbij genoeg bent om ze te
         // onderscheiden; eerder wordt het een kralensnoer.
@@ -1142,7 +1149,7 @@ export class IsoRenderer {
           ctx.setLineDash([spoorBreed * 0.7, spoorBreed * 1.5]);
           for (const el of t.rails) {
             if (this.buitenBeeld(el, bounds)) continue;
-            this.tekenLijn(ctx, el.pts, c.spoorBiels, spoorBreed);
+            this.tekenLijn(ctx, el.pts, c.spoorBiels, breedteVan(el));
           }
           ctx.setLineDash([]);
         }
@@ -1508,6 +1515,7 @@ export class IsoRenderer {
   tekenLijnen(ctx, bounds) {
     if (!this.lijnen.length) return;
     const z = this.cam.zoom;
+    const c = this.colors;
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
 
@@ -1520,33 +1528,51 @@ export class IsoRenderer {
     // Hoe verder uit, hoe strenger: op landsbreedte wil je het regionale
     // net zien, niet elk stadslijntje van drie kilometer.
     const minLengte = z < 0.05 ? 40000 : z < 0.25 ? 15000 : 0;
-    // De brede onderlaag is daar toch niet te onderscheiden van de kern
-    const metCasing = z >= 0.25;
+    // De asfaltbaan is ver uitgezoomd niet te onderscheiden van de streep
+    const metAsfalt = z >= 0.25;
+    // De donkere rand eromheen pas als je er iets van ziet
+    const metRand = z >= 0.6;
+    // Breedte van een straat, niet van een snelweg: waar tien lijnen
+    // dezelfde weg delen liep het anders uit op één donkere vlek.
+    const baan = Math.max(3, Math.min(16, 5.5 * z));
 
-    // Eerst alle gedempte lijnen, dan de uitgelichte er bovenop
-    for (const laag of [0, 1]) {
+    // Loopt langs elk zichtbaar stuk route; de tekenkant vult zelf in wat
+    // er met een segment moet gebeuren.
+    const overSegmenten = (doe) => {
       for (const r of this.lijnen) {
-        const actief = this.zichtbaar(r.lijn);
-        if ((laag === 0) === actief) continue;
         if (!r._segmenten) continue;
-
-        const kleur = r.kleur || this.colors.route;
-        const dim = gefilterd && !actief;
-        const casing = dim ? 0.05 : 0.16;
-        const kern = dim ? 0.10 : (gefilterd ? 0.85 : 0.45);
-
         if (minLengte && (r.lengte || 0) < minLengte) continue;
-
+        const actief = this.zichtbaar(r.lijn);
         for (const seg of r._segmenten) {
           const b = seg.b;
           if (b.maxX < bounds.minX || b.minX > bounds.maxX ||
               b.maxY < bounds.minY || b.minY > bounds.maxY) continue;
-          if (metCasing) {
-            this.drawPolyline(ctx, seg.pts, kleurMetAlpha(kleur, casing), Math.max(4, 9 * z), stap);
-          }
-          this.drawPolyline(ctx, seg.pts, kleurMetAlpha(kleur, kern), Math.max(1.2, 2.4 * z), stap);
+          doe(seg, r, actief);
         }
       }
+    };
+
+    // Eerst het wegdek voor álle routes, in één dekkende kleur. Doordat het
+    // dekkend is stapelt het niet op waar tien lijnen dezelfde straat
+    // delen: je krijgt één asfaltbaan in plaats van een steeds donkerder
+    // wordende vlek. De lijnkleuren komen er daarna als strepen overheen.
+    if (metAsfalt) {
+      if (metRand) {
+        overSegmenten((seg) => this.drawPolyline(ctx, seg.pts, c.asfaltRand, baan + 2, stap));
+      }
+      overSegmenten((seg) => this.drawPolyline(ctx, seg.pts, c.asfalt, baan, stap));
+    }
+
+    // Dan de lijnkleuren: eerst de gedempte, daarna de uitgelichte erop
+    for (const laag of [0, 1]) {
+      overSegmenten((seg, r, actief) => {
+        if ((laag === 0) === actief) return;
+        const kleur = r.kleur || this.colors.route;
+        const dim = gefilterd && !actief;
+        const kern = dim ? 0.22 : (gefilterd ? 0.95 : 0.8);
+        this.drawPolyline(ctx, seg.pts, kleurMetAlpha(kleur, kern),
+                          Math.max(1.2, 2.4 * z), stap);
+      });
     }
   }
 
