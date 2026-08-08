@@ -46,6 +46,12 @@ WEGBREEDTE = {
     "road": 5, "living_street": 5, "motorway_link": 10, "trunk_link": 8,
     "primary_link": 7, "secondary_link": 6, "tertiary_link": 5,
 }
+# Spoor waar echt treinverkeer overheen gaat. Trams en metro's laten we
+# eruit: die lopen door de stad heen en maken het spoornet onleesbaar.
+SPOOR = {"rail", "light_rail", "narrow_gauge"}
+# Rangeerterreinen en opstelsporen leveren een wirwar op bij elk station,
+# terwijl er geen reizigerstrein overheen komt.
+SPOOR_DIENST_UIT = {"yard", "siding", "spur", "crossover"}
 GROEN_LEISURE = {"park", "garden", "playground"}
 GROEN_LANDUSE = {"grass", "meadow", "forest", "cemetery", "recreation_ground", "orchard", "allotments"}
 WATERWEGEN = {"river", "stream", "canal", "ditch"}
@@ -156,6 +162,12 @@ def classificeer(tags):
     if hw:
         breedte = WEGBREEDTE.get(hw)
         return ("streets", int(breedte * 10), False) if breedte else None
+
+    rw = tags.get("railway")
+    if rw in SPOOR:
+        if tags.get("service") in SPOOR_DIENST_UIT:
+            return None
+        return "rails", 0, False
 
     if tags.get("natural") == "water" or tags.get("landuse") in ("basin", "reservoir"):
         return "water", 0, True
@@ -302,10 +314,13 @@ def stap2(werk_map, uit_map, alleen=None):
                     elif soort == "streets":
                         if waarde / 10 < detail["weg"]:
                             continue
+                    elif soort == "rails":
+                        if omvang < detail.get("spoor", 0):
+                            continue
                     elif omvang < detail["omvang"]:
                         continue
 
-                    vlak = soort != "streets"
+                    vlak = soort not in ("streets", "rails")
                     pts = vereenvoudig(pts, eps)
                     if len(pts) < (3 if vlak else 2):
                         continue

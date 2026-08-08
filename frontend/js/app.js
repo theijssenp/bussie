@@ -6,8 +6,8 @@
 // De versie-query hier moet gelijk lopen met index.html's <script>-tags:
 // Cloudflare cachet /js/*.js hardnekkig op URL, en zonder query blijft deze
 // import — anders dan de <script>-tag zelf — op een oude cache hangen.
-import { IsoRenderer } from './kaart.js?v=19';
-import { TegelBron } from './tegels.js?v=19';
+import { IsoRenderer } from './kaart.js?v=24';
+import { TegelBron } from './tegels.js?v=24';
 
 // ---------------------------------------------------------------------------
 // Boot
@@ -175,6 +175,17 @@ async function pollTreinen() {
     renderer.setTreinen(treinen);
   } catch (err) {
     console.warn('Treinen ophalen mislukt:', err);
+  }
+}
+
+async function laadStations() {
+  try {
+    const resp = await fetch('/api/stations');
+    if (!resp.ok) return;
+    const data = await resp.json();
+    renderer.setStations(data.stations || []);
+  } catch (err) {
+    console.warn('Stations laden mislukt:', err);
   }
 }
 
@@ -821,12 +832,25 @@ const TREIN_KLEUREN = {
   trein: '#5a6472',
 };
 
-renderer.onTreinHover = (trein) => {
-  if (!trein) {
-    if (!renderer.hoveredVehicle && !renderer.hoveredSchip) busInfoDiv.style.display = 'none';
-    return;
-  }
+// Herkomst en bestemming zitten niet in de positiefeed, dus die halen we
+// pas op als je een trein aanwijst. Wat binnen is bewaren we hier, zodat
+// hetzelfde treinnummer geen tweede navraag oplevert.
+const ritten = new Map();
 
+function ritOphalen(nummer) {
+  if (ritten.has(nummer)) return;
+  ritten.set(nummer, null);   // bezet, zodat er niet twee tegelijk gaan
+  fetch(`/api/treinen/rit?nummer=${encodeURIComponent(nummer)}`)
+    .then(r => r.ok ? r.json() : null)
+    .then(d => {
+      ritten.set(nummer, d && !d.onbekend && !d.uit ? d : false);
+      // Nog steeds dezelfde trein onder de muis? Dan de popup bijwerken.
+      if (renderer.hoveredTrein?.nummer === nummer) toonTrein(renderer.hoveredTrein);
+    })
+    .catch(() => ritten.set(nummer, false));
+}
+
+function toonTrein(trein) {
   const kleur = TREIN_KLEUREN[trein.soort] || TREIN_KLEUREN.trein;
   const kmu = trein.snelheid;
   const snelheid = kmu === null || kmu === undefined ? '—' : `${Math.round(kmu)} km/u`;
@@ -836,17 +860,38 @@ renderer.onTreinHover = (trein) => {
   const ouderdom = Math.max(0, Math.round(Date.now() / 1000 - trein.t));
   const gemeld = ouderdom < 60 ? `${ouderdom} s geleden` : `${Math.round(ouderdom / 60)} min geleden`;
 
+  const rit = ritten.get(trein.nummer);
+  const soortNaam = (rit && rit.soort) || TREIN_NAMEN[trein.soort] || TREIN_NAMEN.trein;
+  let heen = '';
+  if (rit === undefined || rit === null) {
+    heen = `<div class="veld volgende">Naar<strong>…</strong></div>`;
+  } else if (rit && rit.bestemming) {
+    heen = `<div class="veld volgende">Naar<strong>${rit.bestemming}</strong></div>`;
+  }
+
   busInfoDiv.innerHTML = `
     <div class="kop">
       <span class="lijn-badge" style="background:${kleur};color:${tekstKleur(kleur)}">${trein.nummer}</span>
-      <span class="bestemming">${TREIN_NAMEN[trein.soort] || TREIN_NAMEN.trein}</span>
+      <span class="bestemming">${soortNaam}</span>
     </div>
+    ${heen}
+    ${rit && rit.herkomst ? `<div class="veld"><span>Vanaf</span><strong>${rit.herkomst}</strong></div>` : ''}
     <div class="veld"><span>Snelheid</span><strong>${snelheid}</strong></div>
     <div class="veld"><span>Koers</span><strong>${richting}</strong></div>
+    ${rit && rit.stops ? `<div class="veld"><span>Stops</span><strong>${rit.stops}</strong></div>` : ''}
     <div class="veld zacht"><span>Trein ${trein.nummer}</span><span>${gemeld}</span></div>
   `;
   busInfoDiv.style.display = 'block';
   volgPopup(trein);
+}
+
+renderer.onTreinHover = (trein) => {
+  if (!trein) {
+    if (!renderer.hoveredVehicle && !renderer.hoveredSchip) busInfoDiv.style.display = 'none';
+    return;
+  }
+  ritOphalen(trein.nummer);
+  toonTrein(trein);
 };
 
 /** De popup blijft aan de bus, het schip of de trein hangen terwijl die doorbeweegt. */
@@ -937,6 +982,9 @@ async function start() {
 
   await loadMap();
   await laadPlaatsen();
+  // Stations verschuiven niet en hangen niet aan de buslijnen; meteen
+  // ophalen, niet pas na de 12 MB lijnengeometrie.
+  laadStations();
   bootProgress(70, 'Realtime data ophalen…');
 
   await pollVehicles(true);

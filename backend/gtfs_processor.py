@@ -457,6 +457,27 @@ class BussieHandler(BaseHTTPRequestHandler):
                             cache="no-store")
             return
 
+        if path == "/api/treinen/rit":
+            # Herkomst en bestemming van één rit. De positiefeed geeft die
+            # niet, dus dit is een aparte navraag bij de NS — alleen op
+            # verzoek, en achter een cache in ns_trein.py.
+            from urllib.parse import urlparse, parse_qs
+            qs = parse_qs(urlparse(self.path).query)
+            nummer = (qs.get("nummer") or [""])[0]
+            if not TREINEN or not nummer.isdigit():
+                self._send_json({"uit": True}, cache="no-store")
+                return
+            self._send_json(TREINEN.rit(nummer) or {"onbekend": True},
+                            cache="public, max-age=300")
+            return
+
+        if path == "/api/stations":
+            self._send_json({
+                "v": 1,
+                "stations": TREINEN.stationslijst() if TREINEN else [],
+            }, cache="public, max-age=3600")
+            return
+
         if path == "/api/steden":
             steden = []
             for city, cfg in CITIES.items():

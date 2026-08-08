@@ -16,7 +16,7 @@ Tegelformaat (little-endian, zie ook frontend/js/tegels.js):
     schaal   float32   meters per eenheid (grootte / 32768)
     lagen    uint8
     per laag:
-      soort   uint8    0=water 1=groen 2=straat 3=gebouw
+      soort   uint8    0=water 1=groen 2=straat 3=gebouw 4=spoor
       aantal  uint32
       per element:
         punten  uint16
@@ -52,7 +52,7 @@ CENTER_NL = {"lon": 5.4, "lat": 52.15}
 NIVEAUS = [65536, 32768, 16384, 8192, 4096, 2048]
 EENHEDEN = 32768  # int16-bereik dat één tegel beslaat
 
-SOORTEN = {"water": 0, "green": 1, "streets": 2, "buildings": 3}
+SOORTEN = {"water": 0, "green": 1, "streets": 2, "buildings": 3, "rails": 4}
 
 # Wat komt er op welk niveau in, en hoe grof mag het?
 #
@@ -66,18 +66,21 @@ SOORTEN = {"water": 0, "green": 1, "streets": 2, "buildings": 3}
 # miljoen losse gebouwen ondoenlijk, maar een stad hoort wel een stad te
 # blijven. Per cel van `cel` meter komt er één blok als minstens `dekking`
 # van die cel bebouwd is.
+# `spoor` is dezelfde soort drempel voor spoorlijnen. Die mogen ruimer mee
+# dan gewone wegen: het spoornet is dun en de treinen moeten er zichtbaar
+# op rijden, ook als je een halve provincie in beeld hebt.
 DETAIL = [
     # Atlasniveau: het hele land in beeld. Alleen de kust, de grote wateren,
-    # het snelwegennet en de steden als vlek.
-    {"omvang": 8000, "weg": 14, "gebouwen": False, "eps": 12.0,
+    # het snelwegennet, de hoofdspoorlijnen en de steden als vlek.
+    {"omvang": 8000, "weg": 14, "gebouwen": False, "eps": 12.0, "spoor": 4000,
      "bebouwing": {"cel": 1024, "dekking": 0.04}},
-    {"omvang": 2500, "weg": 14, "gebouwen": False, "eps": 4.0,
+    {"omvang": 2500, "weg": 14, "gebouwen": False, "eps": 4.0, "spoor": 1500,
      "bebouwing": {"cel": 256, "dekking": 0.05}},
-    {"omvang": 1200, "weg": 12, "gebouwen": False, "eps": 2.0,
+    {"omvang": 1200, "weg": 12, "gebouwen": False, "eps": 2.0, "spoor": 700,
      "bebouwing": {"cel": 128, "dekking": 0.05}},
-    {"omvang": 400,  "weg": 8,  "gebouwen": True,  "gebouw_omvang": 25, "eps": 1.0},
-    {"omvang": 100,  "weg": 5,  "gebouwen": True,  "gebouw_omvang": 20, "eps": 0.5},
-    {"omvang": 0,    "weg": 0,  "gebouwen": True,  "gebouw_omvang": 0,  "eps": 0.25},
+    {"omvang": 400,  "weg": 8,  "gebouwen": True,  "gebouw_omvang": 25, "eps": 1.0,  "spoor": 200},
+    {"omvang": 100,  "weg": 5,  "gebouwen": True,  "gebouw_omvang": 20, "eps": 0.5,  "spoor": 50},
+    {"omvang": 0,    "weg": 0,  "gebouwen": True,  "gebouw_omvang": 0,  "eps": 0.25, "spoor": 0},
 ]
 
 # ---------------------------------------------------------------------------

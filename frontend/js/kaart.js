@@ -30,6 +30,9 @@ const MAX_BUSKANTELING = Math.PI / 6;
 // stap te doen — vandaar dat twee vingers niet meer wegschieten.
 const ZOOM_PER_PIXEL = 0.0011;
 
+// Vanaf deze snelheid (km/u) krijgt een voertuig een sliert achter zich
+const SLIERT_VANAF = 45;
+
 // Eén enkel event mag nooit meer dan dit doen; sommige muizen en
 // kinetisch doorrollende trackpads sturen ineens honderden pixels.
 const ZOOM_STAP_MAX = 120;
@@ -94,6 +97,7 @@ export class IsoRenderer {
     this.schepen = [];
     this.hoveredTrein = null;
     this.treinen = [];
+    this.stations = [];
 
     // Theme colors
     this.themes = {
@@ -106,6 +110,10 @@ export class IsoRenderer {
         buildingSide: '#b4b4b0',
         buildingLijn: 'rgba(43,48,56,0.06)',
         bebouwing: '#d3cec4',      // platte stadsvlek ver uitgezoomd
+        spoor: '#9aa3ad',          // spoorbed
+        spoorBiels: '#f2f5f8',     // dwarsstreepjes erover
+        station: '#1a4a86',        // treinstation: rand en naam
+        stationVul: '#ffffff',
         water: '#a8d4ea',
         green: '#cbe7c4',
         route: '#8aa0b2',
@@ -129,6 +137,10 @@ export class IsoRenderer {
         buildingSide: '#1c212c',
         buildingLijn: 'rgba(0,0,0,0.25)',
         bebouwing: '#212734',      // platte stadsvlek ver uitgezoomd
+        spoor: '#4a5464',          // spoorbed
+        spoorBiels: '#161b24',     // dwarsstreepjes erover
+        station: '#7fb4d6',        // treinstation: rand en naam
+        stationVul: '#10151d',
         water: '#17334f',
         green: '#1a3328',
         route: '#7f96ab',
@@ -706,6 +718,7 @@ export class IsoRenderer {
       }
       // Een intercity is langer dan een sprinter
       const bakken = trein.soort === 'intercity' ? 3 : 2;
+      this.tekenSliert(ctx, p.x, p.y, hoek, trein.snelheid, schaal, kleur);
       this.tekenTrein(ctx, p.x, p.y, schaal, hoek,
                       this.hoveredTrein === trein, kleur, bakken);
     }
@@ -730,6 +743,33 @@ export class IsoRenderer {
         ctx.stroke();
       }
     }
+  }
+
+  /**
+   * Een sliert achter een voertuig dat hard gaat. Een trein van 140 km/u
+   * ziet er op een stilstaand plaatje net zo uit als eentje die op het
+   * perron wacht; deze veeg maakt het verschil meteen zichtbaar. Hij
+   * groeit met de snelheid en vervaagt naar achteren.
+   */
+  tekenSliert(ctx, x, y, hoek, kmu, schaal, kleur) {
+    if (!kmu || kmu < SLIERT_VANAF) return;
+    const kracht = Math.min(1, (kmu - SLIERT_VANAF) / 100);
+    const lengte = (14 + 46 * kracht) * schaal;
+    const dx = Math.cos(hoek), dy = Math.sin(hoek);
+
+    const veeg = ctx.createLinearGradient(x, y, x - dx * lengte, y - dy * lengte);
+    veeg.addColorStop(0, kleurMetAlpha(kleur, Math.round((0.42 * kracht + 0.16) * 50) / 50));
+    veeg.addColorStop(1, kleurMetAlpha(kleur, 0));
+
+    ctx.save();
+    ctx.strokeStyle = veeg;
+    ctx.lineCap = 'round';
+    ctx.lineWidth = 5.5 * schaal;
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    ctx.lineTo(x - dx * lengte, y - dy * lengte);
+    ctx.stroke();
+    ctx.restore();
   }
 
   setLineFilter(lines) {
@@ -913,6 +953,7 @@ export class IsoRenderer {
       if (this._zichtbareTegels) this.tekenStraatnamen(bgCtx, this._zichtbareTegels);
       this.tekenPlaatsen(bgCtx);
       this.tekenHaltes(bgCtx);
+      this.tekenStations(bgCtx);
 
       this._bgSnapshot = snap;
       this._bgVies = false;
@@ -957,6 +998,29 @@ export class IsoRenderer {
         this.tekenLijn(ctx, el.pts, breedte >= 10 ? c.streetMajor : c.street,
                        Math.max(1.2, breedte * z * 0.9));
       }
+      // Spoor: eerst het baanbed, en zodra je dicht genoeg bent dwarsliggers
+      // eroverheen. Dat leest meteen als spoorlijn in plaats van als zomaar
+      // een grijze weg — en de treinen rijden er nu zichtbaar overheen.
+      if (t.rails.length) {
+        const spoorBreed = Math.max(1, Math.min(5, 1.5 * z));
+        ctx.lineCap = 'butt';
+        for (const el of t.rails) {
+          if (this.buitenBeeld(el, bounds)) continue;
+          this.tekenLijn(ctx, el.pts, c.spoor, spoorBreed);
+        }
+        // Dwarsliggers pas als je dichtbij genoeg bent om ze te
+        // onderscheiden; eerder wordt het een kralensnoer.
+        if (z > 1) {
+          ctx.setLineDash([spoorBreed * 0.7, spoorBreed * 1.5]);
+          for (const el of t.rails) {
+            if (this.buitenBeeld(el, bounds)) continue;
+            this.tekenLijn(ctx, el.pts, c.spoorBiels, spoorBreed);
+          }
+          ctx.setLineDash([]);
+        }
+        ctx.lineCap = 'round';
+      }
+
       // Op de grove niveaus staan er geen panden in de tegel maar
       // samengevatte blokken. Die als gebouw overeind zetten geeft een
       // schaakbord; plat meelopen met de ondergrond leest als een stadsvlek
@@ -1031,6 +1095,80 @@ export class IsoRenderer {
         ctx.fillText(label.naam, 0, 0);
         ctx.restore();
       }
+    }
+  }
+
+  /** De treinstations, met hun positie alvast naar wereldmeters gerekend. */
+  setStations(stations) {
+    const center = this.center;
+    if (!center) return;
+    const R = 6378137, n = Math.PI / 180, cosLat = Math.cos(center.lat * n);
+    // Grootste eerst: bij ruimtegebrek wint een knooppunt van een halte
+    this.stations = [...(stations || [])]
+      .sort((a, b) => b.maat - a.maat)
+      .map(s => ({
+        ...s,
+        _wx: (s.lon - center.lon) * n * R * cosLat,
+        _wy: -(s.lat - center.lat) * n * R,
+      }));
+    this._bgVies = true;
+  }
+
+  /**
+   * Treinstations: een roundel op het spoor, groter naarmate het station
+   * belangrijker is. De naam komt erbij zodra er ruimte voor is — grote
+   * knooppunten eerder dan een stoptreinhalte in de polder.
+   */
+  tekenStations(ctx) {
+    if (!this.stations?.length) return;
+    const z = this.cam.zoom;
+    if (z < 0.12) return;
+    const c = this.colors;
+
+    // Vanaf welke zoom een station van deze maat mee mag doen
+    const vanaf = { 3: 0.12, 2: 0.45, 1: 0.9 };
+    const naamVanaf = { 3: 0.5, 2: 1.1, 1: 1.9 };
+    const bezet = [];
+
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.lineJoin = 'round';
+
+    for (const s of this.stations) {
+      if (z < vanaf[s.maat]) continue;
+      const p = this.worldToScreen(s._wx, s._wy);
+      if (p.x < -20 || p.x > this.vw + 20 || p.y < -20 || p.y > this.vh + 20) continue;
+
+      const r = Math.max(2.2, Math.min(7, (s.maat * 0.9 + 1.2) * Math.sqrt(z)));
+      ctx.fillStyle = c.stationVul;
+      ctx.strokeStyle = c.station;
+      ctx.lineWidth = Math.max(1.2, r * 0.45);
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, r, 0, TAU);
+      ctx.fill();
+      ctx.stroke();
+
+      if (z < naamVanaf[s.maat] || !s.naam) continue;
+      const grootte = Math.max(10, Math.min(15, 8 + z * 1.3));
+      ctx.font = `600 ${grootte}px ${this.labelFont || 'system-ui, sans-serif'}`;
+      const breedte = ctx.measureText(s.naam).width;
+      const halfB = breedte / 2 + 5, halfH = grootte * 0.75;
+      const ly = p.y - r - halfH - 1;
+      let vrij = true;
+      for (const b of bezet) {
+        if (Math.abs(p.x - b.x) < halfB + b.hb && Math.abs(ly - b.y) < halfH + b.hh) {
+          vrij = false;
+          break;
+        }
+      }
+      if (!vrij) continue;
+      bezet.push({ x: p.x, y: ly, hb: halfB, hh: halfH });
+
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = c.bg;
+      ctx.strokeText(s.naam, p.x, ly);
+      ctx.fillStyle = c.station;
+      ctx.fillText(s.naam, p.x, ly);
     }
   }
 
@@ -1370,6 +1508,10 @@ export class IsoRenderer {
       const route = v._route;
       const kleur = route?.kleur || this.colors.route;
       const geselecteerd = this.hoveredVehicle && this.hoveredVehicle.id === v.id;
+      const ms = this.snelheidVan(v);
+      if (ms !== null) {
+        this.tekenSliert(ctx, p.x, p.y, this.schermHoek(hoek), ms * 3.6, schaal, kleur);
+      }
       this.tekenBus(ctx, p.x, p.y, schaal, this.schermHoek(hoek), geselecteerd, kleur);
       if (z > 0.6) this.tekenLijnLabel(ctx, p.x, p.y, schaal, v.lijn, kleur);
     }
@@ -1411,10 +1553,13 @@ export class IsoRenderer {
         : mengKleur(basis, [255, 255, 255], 0.24)),
       // Alleen echt bleke bussen (geel) krijgen donkere ruiten; de rest
       // houdt de lichte ruitjes, dat leest als een busje in plaats van als
-      // een gekleurd blokje.
-      ruit: rgbNaarString(licht > 190
-        ? mengKleur(basis, [40, 45, 54], 0.62)
-        : mengKleur(basis, [242, 248, 252], 0.85)),
+      // een gekleurd blokje. 's Nachts branden de lampen: dan worden het
+      // warme geeltinten, wat een donkere kaart meteen leven geeft.
+      ruit: this.theme === 'dark'
+        ? rgbNaarString(mengKleur(basis, [255, 226, 150], 0.88))
+        : rgbNaarString(licht > 190
+          ? mengKleur(basis, [40, 45, 54], 0.62)
+          : mengKleur(basis, [242, 248, 252], 0.85)),
       wiel: licht < 55 ? 'rgba(240,244,250,0.45)' : c.busWiel,
       rand: rgbNaarString(schaalKleur(basis, 0.62)),
     };
@@ -1451,6 +1596,18 @@ export class IsoRenderer {
     ctx.fill();
 
     ctx.translate(-w / 2, -h);
+
+    // 's Nachts schijnen de koplampen vooruit — een zacht schijnsel voor
+    // de neus maakt van een donkere kaart meteen een avondkaart.
+    if (this.theme === 'dark') {
+      ctx.save();
+      ctx.globalAlpha = 0.28;
+      ctx.fillStyle = '#ffdf9a';
+      ctx.beginPath();
+      ctx.ellipse(w + h * 0.45, h * 0.62, h * 1.05, h * 0.38, 0, 0, TAU);
+      ctx.fill();
+      ctx.restore();
+    }
 
     // Wielen
     ctx.fillStyle = bus.wiel;
@@ -1531,6 +1688,18 @@ export class IsoRenderer {
     ctx.fill();
 
     ctx.translate(-w / 2, -h);
+
+    // 's Nachts schijnen de koplampen vooruit — een zacht schijnsel voor
+    // de neus maakt van een donkere kaart meteen een avondkaart.
+    if (this.theme === 'dark') {
+      ctx.save();
+      ctx.globalAlpha = 0.28;
+      ctx.fillStyle = '#ffdf9a';
+      ctx.beginPath();
+      ctx.ellipse(w + h * 0.45, h * 0.62, h * 1.05, h * 0.38, 0, 0, TAU);
+      ctx.fill();
+      ctx.restore();
+    }
 
     // De omtrek van één bak; de voorste krijgt de neus
     const bakPad = (x0, kop) => {

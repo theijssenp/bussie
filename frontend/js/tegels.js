@@ -5,7 +5,7 @@
 // ============================================================
 
 const MAGIC = 0x31475442; // 'BTG1' little-endian gelezen als uint32
-const SOORTEN = ['water', 'green', 'streets', 'buildings'];
+const SOORTEN = ['water', 'green', 'streets', 'buildings', 'rails'];
 
 /** Vaste ruiswaarde 0..1 uit een coördinaat — zelfde plek, zelfde kleur. */
 function hashPositie(x, y) {
@@ -39,7 +39,7 @@ export function decodeerTegel(buffer, tintenAantal = 6) {
     niveau, tx, ty, grootte, schaal,
     minX: vx, minY: vy, maxX: vx + grootte, maxY: vy + grootte,
     diep: vx + vy,
-    water: [], green: [], streets: [], buildings: [],
+    water: [], green: [], streets: [], buildings: [], rails: [],
     punten: 0,
   };
 
