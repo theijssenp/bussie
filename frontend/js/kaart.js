@@ -674,40 +674,61 @@ export class IsoRenderer {
   tekenTreinen(ctx) {
     if (!this.treinen?.length) return;
     const z = this.cam.zoom;
-    const schaal = Math.max(0.85, Math.min(2.0, 0.55 + z * 0.55));
+    // Net als bij de bussen: zodra de tegels echte gebouwen tonen blijft het
+    // een volwaardig treinstel. Treinen mogen daarbij wat royaler uitvallen
+    // dan een busje — ze zijn in het echt ook een stuk groter, en er rijden
+    // er veel minder, dus ze mogen opvallen.
+    const metGebouwen = this.tegelStand?.niveau >= 3;
+    const schaal = metGebouwen
+      ? Math.max(1.6, Math.min(2.3, 0.6 + z * 0.6))
+      : Math.max(1.0, Math.min(2.3, 0.6 + z * 0.6));
 
-    const stippen = z < STIP_ZOOM;
+    const stippen = z < STIP_ZOOM && !metGebouwen;
     const perKleur = new Map();
 
     for (const trein of this.treinen) {
       const pos = this.positieVanTrein(trein);
       const p = this.worldToScreen(pos.x, pos.y);
-      if (p.x < -50 || p.x > this.vw + 50 || p.y < -50 || p.y > this.vh + 50) {
+      if (p.x < -60 || p.x > this.vw + 60 || p.y < -60 || p.y > this.vh + 60) {
         trein._sx = undefined;
         continue;
       }
       trein._sx = p.x;
       trein._sy = p.y;
       const kleur = TREIN_KLEUREN[trein.soort] || TREIN_KLEUREN.trein;
+      const hoek = this.schermHoek(koersNaarWereld(trein.koers));
 
       if (stippen) {
         const lijst = perKleur.get(kleur);
-        if (lijst) lijst.push(p);
-        else perKleur.set(kleur, [p]);
+        if (lijst) lijst.push({ p, hoek });
+        else perKleur.set(kleur, [{ p, hoek }]);
         continue;
       }
-      this.tekenTrein(ctx, p.x, p.y, schaal, this.schermHoek(koersNaarWereld(trein.koers)),
-                       this.hoveredTrein === trein, kleur);
+      // Een intercity is langer dan een sprinter
+      const bakken = trein.soort === 'intercity' ? 3 : 2;
+      this.tekenTrein(ctx, p.x, p.y, schaal, hoek,
+                      this.hoveredTrein === trein, kleur, bakken);
     }
 
-    for (const [kleur, punten] of perKleur) {
-      ctx.fillStyle = kleur;
-      ctx.beginPath();
-      for (const p of punten) {
-        ctx.moveTo(p.x + 2.2, p.y);
-        ctx.arc(p.x, p.y, 2.2, 0, TAU);
+    // Ver uitgezoomd: een streepje in de rijrichting in plaats van een stip.
+    // Dat leest als een trein op een spoor, en is van ver een stuk beter te
+    // zien dan een rond puntje van twee beeldpunten.
+    if (perKleur.size) {
+      const nabij = Math.min(1, z / STIP_ZOOM + 0.45);
+      const lengte = Math.max(6, 11 * nabij);
+      ctx.lineCap = 'round';
+      ctx.lineWidth = Math.max(2.4, 3.6 * nabij);
+      for (const [kleur, items] of perKleur) {
+        ctx.strokeStyle = kleur;
+        ctx.beginPath();
+        for (const { p, hoek } of items) {
+          const dx = Math.cos(hoek) * lengte * 0.5;
+          const dy = Math.sin(hoek) * lengte * 0.5;
+          ctx.moveTo(p.x - dx, p.y - dy);
+          ctx.lineTo(p.x + dx, p.y + dy);
+        }
+        ctx.stroke();
       }
-      ctx.fill();
     }
   }
 
@@ -1478,18 +1499,21 @@ export class IsoRenderer {
   }
 
   /**
-   * Een trein: langer en lager dan een bus, met een spitse neus zodat de
-   * rijrichting ook zonder kleur meteen leesbaar is — dezelfde truc als bij
-   * de schepen. Verder hergebruikt dit de bus-kleurafleiding: eigen lijnkleur
-   * blijft dus net zo goed werken.
+   * Een treinstel: meerdere gekoppelde bakken achter elkaar, met een spitse
+   * neus vooraan zodat de rijrichting ook zonder kleur leesbaar is. Het
+   * aantal bakken maakt een intercity vanzelf langer dan een sprinter, en
+   * geeft de trein de lengte die hem naast een busje als trein laat lezen.
+   * De kleurafleiding komt van de bussen, dus een eigen kleur werkt net zo.
    */
-  tekenTrein(ctx, x, y, schaal, hoek, geselecteerd, kleur) {
+  tekenTrein(ctx, x, y, schaal, hoek, geselecteerd, kleur, bakken = 2) {
     const c = this.colors;
     const trein = this.busKleuren(kleur);
-    const w = 42 * schaal;
-    const h = 9 * schaal;
-    const neus = w * 0.16;
-    const r = 2.4 * schaal;
+    const bakL = 21 * schaal;          // lengte van één rijtuig
+    const kier = 2.4 * schaal;         // koppeling ertussen
+    const w = bakken * bakL + (bakken - 1) * kier;
+    const h = 12 * schaal;
+    const neus = bakL * 0.3;
+    const r = 2.6 * schaal;
 
     ctx.save();
     ctx.translate(x, y);
@@ -1500,79 +1524,84 @@ export class IsoRenderer {
     ctx.rotate(draai);
     if (spiegel) ctx.scale(-1, 1);
 
-    // Schaduw op de grond
+    // Schaduw over de hele lengte
     ctx.fillStyle = c.schaduw;
     ctx.beginPath();
-    ctx.ellipse(0, h * 0.16, w * 0.5, h * 0.3, 0, 0, TAU);
+    ctx.ellipse(0, h * 0.16, w * 0.5, h * 0.26, 0, 0, TAU);
     ctx.fill();
 
     ctx.translate(-w / 2, -h);
 
-    // Bogies: bij een trein zitten de wielen vrijwel onder de bak verstopt,
-    // dus twee subtiele donkere balkjes in plaats van ronde buswielen.
-    ctx.fillStyle = trein.wiel;
-    const bogieW = w * 0.14, bogieH = 1.6 * schaal;
-    ctx.fillRect(w * 0.18, h - bogieH * 0.4, bogieW, bogieH);
-    ctx.fillRect(w * 0.68, h - bogieH * 0.4, bogieW, bogieH);
-
-    // Carrosserie: een rechthoekige bak met een spitse neus vooraan (rechts,
-    // vóór het spiegelen) — leest als een treinstel in plaats van een blokje.
-    ctx.fillStyle = trein.body;
-    ctx.beginPath();
-    ctx.moveTo(r, 0);
-    ctx.lineTo(w - neus, 0);
-    ctx.lineTo(w, h * 0.5);
-    ctx.lineTo(w - neus, h);
-    ctx.lineTo(r, h);
-    ctx.arcTo(0, h, 0, h - r, r);
-    ctx.lineTo(0, r);
-    ctx.arcTo(0, 0, r, 0, r);
-    ctx.closePath();
-    ctx.fill();
-
-    // Daklijn
-    ctx.fillStyle = trein.dak;
-    afgerondeRechthoek(ctx, 0, 0, w - neus * 0.6, h * 0.3, r * 0.8);
-    ctx.fill();
-
-    // Pantograaf: een klein streepje op het dak, ietwat naar achteren —
-    // klein detail maar meteen herkenbaar als trein.
-    ctx.strokeStyle = trein.rand;
-    ctx.lineWidth = Math.max(0.5, 0.45 * schaal);
-    ctx.beginPath();
-    ctx.moveTo(w * 0.38, 0);
-    ctx.lineTo(w * 0.42, -h * 0.22);
-    ctx.lineTo(w * 0.5, -h * 0.22);
-    ctx.lineTo(w * 0.54, 0);
-    ctx.stroke();
-
-    // Ramenstrook: één doorlopende band i.p.v. losse busramen, licht
-    // onderverdeeld zodat het als treinstel met meerdere bakken leest.
-    ctx.fillStyle = trein.ruit;
-    afgerondeRechthoek(ctx, w * 0.05, h * 0.32, w - neus - w * 0.1, h * 0.32, 1 * schaal);
-    ctx.fill();
-    ctx.strokeStyle = c.bg;
-    ctx.lineWidth = Math.max(0.5, 0.4 * schaal);
-    for (const frac of [0.36, 0.62]) {
+    // De omtrek van één bak; de voorste krijgt de neus
+    const bakPad = (x0, kop) => {
+      if (!kop) {
+        afgerondeRechthoek(ctx, x0, 0, bakL, h, r);
+        return;
+      }
       ctx.beginPath();
-      ctx.moveTo(w * frac, h * 0.32);
-      ctx.lineTo(w * frac, h * 0.64);
+      ctx.moveTo(x0 + r, 0);
+      ctx.lineTo(x0 + bakL - neus, 0);
+      ctx.lineTo(x0 + bakL, h * 0.5);
+      ctx.lineTo(x0 + bakL - neus, h);
+      ctx.lineTo(x0 + r, h);
+      ctx.arcTo(x0, h, x0, h - r, r);
+      ctx.lineTo(x0, r);
+      ctx.arcTo(x0, 0, x0 + r, 0, r);
+      ctx.closePath();
+    };
+
+    const x0Van = (i) => i * (bakL + kier);
+
+    // Koppelingen tussen de bakken
+    ctx.fillStyle = trein.wiel;
+    for (let i = 0; i < bakken - 1; i++) {
+      ctx.fillRect(x0Van(i) + bakL, h * 0.40, kier, h * 0.22);
+    }
+
+    for (let i = 0; i < bakken; i++) {
+      const x0 = x0Van(i);
+      const kop = i === bakken - 1;   // voorste bak
+
+      // Bogies: bij een trein zitten de wielen vrijwel onder de bak
+      // verstopt, dus subtiele balkjes in plaats van ronde buswielen.
+      ctx.fillStyle = trein.wiel;
+      const bogieW = bakL * 0.19, bogieH = 1.7 * schaal;
+      ctx.fillRect(x0 + bakL * 0.13, h - bogieH * 0.35, bogieW, bogieH);
+      ctx.fillRect(x0 + bakL * 0.66, h - bogieH * 0.35, bogieW, bogieH);
+
+      // Carrosserie
+      ctx.fillStyle = trein.body;
+      bakPad(x0, kop);
+      ctx.fill();
+
+      // Daklijn geeft volume
+      ctx.fillStyle = trein.dak;
+      afgerondeRechthoek(ctx, x0, 0, bakL - (kop ? neus * 0.55 : 0), h * 0.27, r * 0.8);
+      ctx.fill();
+
+      // Doorlopende ramenstrook per bak
+      ctx.fillStyle = trein.ruit;
+      afgerondeRechthoek(ctx, x0 + bakL * 0.09, h * 0.34,
+                         bakL * (kop ? 0.6 : 0.82), h * 0.29, 1 * schaal);
+      ctx.fill();
+
+      // Randje voor definitie
+      ctx.strokeStyle = trein.rand;
+      ctx.lineWidth = Math.max(0.6, 0.45 * schaal);
+      bakPad(x0, kop);
       ctx.stroke();
     }
 
-    // Randje voor definitie
+    // Pantograaf op het dak van de voorste bak — klein detail, maar meteen
+    // herkenbaar als trein in plaats van een langgerekte bus.
+    const px = x0Van(bakken - 1) + bakL * 0.34;
     ctx.strokeStyle = trein.rand;
-    ctx.lineWidth = Math.max(0.6, 0.5 * schaal);
+    ctx.lineWidth = Math.max(0.5, 0.4 * schaal);
     ctx.beginPath();
-    ctx.moveTo(r, 0);
-    ctx.lineTo(w - neus, 0);
-    ctx.lineTo(w, h * 0.5);
-    ctx.lineTo(w - neus, h);
-    ctx.lineTo(r, h);
-    ctx.arcTo(0, h, 0, h - r, r);
-    ctx.lineTo(0, r);
-    ctx.arcTo(0, 0, r, 0, r);
-    ctx.closePath();
+    ctx.moveTo(px - bakL * 0.1, 0);
+    ctx.lineTo(px - bakL * 0.05, -h * 0.2);
+    ctx.lineTo(px + bakL * 0.05, -h * 0.2);
+    ctx.lineTo(px + bakL * 0.1, 0);
     ctx.stroke();
 
     ctx.restore();
@@ -1581,7 +1610,7 @@ export class IsoRenderer {
       ctx.strokeStyle = c.text;
       ctx.lineWidth = 2;
       ctx.beginPath();
-      ctx.arc(x, y - h * 0.4, w * 0.56, 0, TAU);
+      ctx.arc(x, y - h * 0.4, w * 0.54, 0, TAU);
       ctx.stroke();
     }
   }

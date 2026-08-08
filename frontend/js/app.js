@@ -6,8 +6,8 @@
 // De versie-query hier moet gelijk lopen met index.html's <script>-tags:
 // Cloudflare cachet /js/*.js hardnekkig op URL, en zonder query blijft deze
 // import — anders dan de <script>-tag zelf — op een oude cache hangen.
-import { IsoRenderer } from './kaart.js?v=18';
-import { TegelBron } from './tegels.js?v=18';
+import { IsoRenderer } from './kaart.js?v=19';
+import { TegelBron } from './tegels.js?v=19';
 
 // ---------------------------------------------------------------------------
 // Boot
