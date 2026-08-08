@@ -1803,9 +1803,13 @@ export class IsoRenderer {
     ctx.save();
     ctx.translate(x, y);
 
+    // Anders dan een bus knijpen we de hoek hier niet af. Een bus rijdt op
+    // een weg die je nauwelijks ziet, dus daar wint "niet op zijn neus
+    // staan". Een trein ligt op een spoor dat eronder zichtbaar is, en dan
+    // valt elke graad verschil op: de trein reed dan diagonaal over de
+    // baan. Na het spiegelen ligt de hoek sowieso binnen een kwartslag.
     const spiegel = Math.cos(hoek) < 0;
-    let draai = spiegel ? (hoek > 0 ? hoek - Math.PI : hoek + Math.PI) : hoek;
-    draai = Math.max(-MAX_BUSKANTELING, Math.min(MAX_BUSKANTELING, draai));
+    const draai = spiegel ? (hoek > 0 ? hoek - Math.PI : hoek + Math.PI) : hoek;
     ctx.rotate(draai);
     if (spiegel) ctx.scale(-1, 1);
 
