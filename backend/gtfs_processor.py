@@ -69,7 +69,7 @@ REALTIME_LOCK = threading.Lock()
 
 # AIS-scheepvaart (eigen achtergronddraad met een websocket)
 SCHEEPVAART = None
-# NS-treinposities (eigen achtergronddraad, elke 30s gepolld)
+# NS-treinposities (eigen achtergronddraad, elke 5s gepolld)
 TREINEN = None
 
 logging.basicConfig(
@@ -449,7 +449,7 @@ class BussieHandler(BaseHTTPRequestHandler):
                 "v": 1,
                 "ts": int(time.time()),
                 "treinen": TREINEN.momentopname(),
-            }, cache="public, max-age=10")
+            }, cache="public, max-age=3")
             return
 
         if path == "/api/treinen/status":

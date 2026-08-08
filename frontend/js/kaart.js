@@ -770,7 +770,7 @@ export class IsoRenderer {
    * uit de tegels, en nemen we meteen de richting van dat spoor over.
    */
   positieVanTrein(trein) {
-    const verstreken = Math.min(45, Date.now() / 1000 - trein._gezien);
+    const verstreken = Math.min(20, Date.now() / 1000 - trein._gezien);
     let x = trein._wx, y = trein._wy;
     let hoek = koersNaarWereld(trein.koers);
 

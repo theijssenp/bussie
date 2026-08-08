@@ -17,6 +17,7 @@ import os
 import threading
 import time
 import urllib.request
+from collections import deque
 
 log = logging.getLogger("treinen")
 
@@ -25,7 +26,18 @@ BASIS = "https://gateway.apiportal.ns.nl"
 ENDPOINT = BASIS + "/virtual-train-api/api/vehicle"
 STATIONS_ENDPOINT = BASIS + "/nsapp-stations/v3"
 RIT_ENDPOINT = BASIS + "/reisinformatie-api/api/v2/journey?train="
-INTERVAL = 30  # seconden tussen ophalingen — het is een gedeelde sleutel, niet gulzig zijn
+# De NS-posities verversen doorlopend: per twee tot vijf seconden wisselt
+# een derde van de treinen van plek. Vaker peilen dan dit levert dus echt
+# vloeiender beeld op, en past ruim binnen het quotum (zie hieronder).
+INTERVAL = 5
+
+# NS staat 300 aanroepen per vijf minuten toe. De positiefeed gebruikt er
+# daarvan 60; de rest is voor de ritnavragen. RESERVE is wat we altijd vrij
+# houden voor de posities zelf — komt het verbruik daarbinnen, dan slaan we
+# ritnavragen over in plaats van de kaart te laten haperen.
+QUOTA_VENSTER = 300
+QUOTA_LIMIET = 300
+QUOTA_RESERVE = 120
 
 # Anders dan bussen is een treinstel een uniek, herkenbaar voertuig uit een
 # beperkte vloot, en de feed heeft geregeld gaten: bij elke ronde vallen er
@@ -72,6 +84,8 @@ class Treinen:
         self.stations_op = 0         # wanneer voor het laatst opgehaald
         self.ritten = {}             # ritnummer → (tijd, {herkomst, bestemming})
         self.rit_slot = threading.Lock()
+        self._aanroepen = deque()    # tijdstippen, voor de quotumbewaking
+        self._quota_slot = threading.Lock()
 
     @staticmethod
     def _lees_sleutel():
@@ -83,8 +97,18 @@ class Treinen:
                 return f.read().strip()
         return ""
 
+    def _ruimte(self):
+        """Hoeveel aanroepen we in dit venster nog overhebben."""
+        grens = time.time() - QUOTA_VENSTER
+        with self._quota_slot:
+            while self._aanroepen and self._aanroepen[0] < grens:
+                self._aanroepen.popleft()
+            return QUOTA_LIMIET - len(self._aanroepen)
+
     def _haal(self, url, timeout=15):
         """JSON ophalen bij de NS-gateway met de sleutel in de header."""
+        with self._quota_slot:
+            self._aanroepen.append(time.time())
         req = urllib.request.Request(url, headers={
             "Ocp-Apim-Subscription-Key": self.sleutel,
             "User-Agent": "bussie.hodc.nl/0.1",
@@ -141,6 +165,12 @@ class Treinen:
             if bewaard and nu - bewaard[0] < RIT_VERVAL:
                 return bewaard[1]
 
+        # Bij druk verkeer gaan de posities voor: die houden de kaart levend,
+        # een bestemming is mooi meegenomen. Zonder ruimte proberen we het
+        # later opnieuw in plaats van het antwoord lang te bewaren.
+        if self._ruimte() <= QUOTA_RESERVE:
+            return None
+
         try:
             data = self._haal(RIT_ENDPOINT + nummer, timeout=12)
             stops = (data.get("payload") or {}).get("stops") or []
@@ -178,12 +208,9 @@ class Treinen:
     # -- ophalen -------------------------------------------------------
 
     def _ophalen(self):
-        req = urllib.request.Request(ENDPOINT, headers={
-            "Ocp-Apim-Subscription-Key": self.sleutel,
-            "User-Agent": "bussie.hodc.nl/0.1",
-        })
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read())
+        # Via _haal, anders telt juist de grootste verbruiker niet mee in
+        # de quotumbewaking.
+        data = self._haal(ENDPOINT)
 
         treinen = (data.get("payload") or {}).get("treinen") or []
         nu = time.time()
@@ -233,6 +260,8 @@ class Treinen:
             "verbonden": self.verbonden,
             "treinen": aantal,
             "laatste_ophaal": int(self.laatste_ophaal),
+            "quota_over": self._ruimte(),
+            "quota_limiet": QUOTA_LIMIET,
             **self.tellingen,
         }
 

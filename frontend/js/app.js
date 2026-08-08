@@ -6,8 +6,8 @@
 // De versie-query hier moet gelijk lopen met index.html's <script>-tags:
 // Cloudflare cachet /js/*.js hardnekkig op URL, en zonder query blijft deze
 // import — anders dan de <script>-tag zelf — op een oude cache hangen.
-import { IsoRenderer } from './kaart.js?v=26';
-import { TegelBron } from './tegels.js?v=26';
+import { IsoRenderer } from './kaart.js?v=27';
+import { TegelBron } from './tegels.js?v=27';
 
 // ---------------------------------------------------------------------------
 // Boot
@@ -999,10 +999,9 @@ async function start() {
   pollSchepen();
   setInterval(pollSchepen, 15000);
 
-  // Treinen: de backend pollt de NS API zelf maar eens per 30s, dus vaker
-  // navragen heeft geen zin — de frontend rekent tussendoor gewoon door.
+  // Treinen: de backend ververst elke 5s bij de NS, dus even vaak navragen.
   pollTreinen();
-  setInterval(pollTreinen, 20000);
+  setInterval(pollTreinen, 5000);
 
   // De zijbalk toont afstanden tot de volgende halte — die lopen mee.
   setInterval(() => { if (overzichtOpen) updateBusoverzicht(); }, 5000);
