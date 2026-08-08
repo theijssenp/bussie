@@ -53,6 +53,16 @@ export class IsoRenderer {
     this.canvas = canvas;
     this.ctx = canvas.getContext('2d', { alpha: false });
 
+    // De ondergrond (tegels, lijnen, straatnamen, plaatsen, haltes)
+    // verandert alleen als de camera, thema of data verandert — niet elke
+    // animatieframe. Die tekenen we daarom op een apart canvas en hergebruiken
+    // we (drawImage) totdat er echt iets wijzigt; alleen de bewegende lagen
+    // (bussen, treinen, schepen) komen er elk frame overheen.
+    this.achtergrondCanvas = document.createElement('canvas');
+    this.achtergrondCtx = this.achtergrondCanvas.getContext('2d', { alpha: false });
+    this._bgVies = true;
+    this._bgSnapshot = null;
+
     // Camera state
     this.cam = { x: 0, y: 0, zoom: 1, rotation: 0 };
     this.targetCam = { x: 0, y: 0, zoom: 1, rotation: 0 };
@@ -183,6 +193,7 @@ export class IsoRenderer {
     localStorage.setItem('bussie-theme', theme);
     this.bouwGevelPalet();
     this._busKleuren?.clear();
+    this._bgVies = true;
     this.render();
   }
 
@@ -242,9 +253,19 @@ export class IsoRenderer {
     this.canvas.style.width = w + 'px';
     this.canvas.style.height = h + 'px';
     this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    this.achtergrondCanvas.width = w * dpr;
+    this.achtergrondCanvas.height = h * dpr;
+    this.achtergrondCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
     this.vw = w;
     this.vh = h;
+    this._bgVies = true;
     this.render();
+  }
+
+  /** Forceer een verse tekenbeurt van de ondergrond (tegels/lijnen/haltes),
+   * bijvoorbeeld nadat de lijnfilter is aangepast. */
+  markeerAchtergrondVies() {
+    this._bgVies = true;
   }
 
   // === Coördinaat transformaties ===
@@ -681,6 +702,7 @@ export class IsoRenderer {
 
   setLineFilter(lines) {
     this.filteredLines = new Set(lines);
+    this._bgVies = true;
   }
 
   zichtbaar(lijn) {
@@ -799,8 +821,7 @@ export class IsoRenderer {
   render() {
     if (!this.tegelBron) return;
 
-    const ctx = this.ctx;
-    const c = this.colors;
+    const mainCtx = this.ctx;
 
     // Camera-interpolatie (soepel toebewegen)
     this.cam.x += (this.targetCam.x - this.cam.x) * 0.12;
@@ -822,9 +843,6 @@ export class IsoRenderer {
       this.sinA = Math.sin(this.draai);
     }
 
-    ctx.fillStyle = c.bg;
-    ctx.fillRect(0, 0, this.vw, this.vh);
-
     // Projectie één keer per frame uitrekenen; de tekenlussen gebruiken
     // deze getallen rechtstreeks in plaats van worldToScreen per punt.
     this._proj = {
@@ -835,19 +853,45 @@ export class IsoRenderer {
 
     const b = this.viewportBounds();
 
-    // Detailniveau bepaalt welk tegelniveau we ophalen. Hoe platter de
-    // kanteling, hoe meer kaart er in beeld past, dus dat telt mee.
-    const detail = z * Math.sqrt(this.tilt / 0.55);
-    this.tekenTegels(ctx, b, detail);
+    // De ondergrond (tegels, lijnen, straatnamen, plaatsen, haltes) is
+    // duur om te tekenen maar verandert alleen als de camera, het thema
+    // of de data echt anders is — niet elke animatieframe. Bij een
+    // stilstaande kaart hergebruiken we daarom het vorige plaatje in
+    // plaats van alles opnieuw te tekenen; alleen bussen/treinen/schepen
+    // komen er (goedkoop) elk frame overheen.
+    const snap = { x: this.cam.x, y: this.cam.y, z, tilt: this.tilt, draai: this.draai };
+    const vorig = this._bgSnapshot;
+    const veranderd = !vorig
+      || Math.abs((snap.x - vorig.x) * z) > 0.2
+      || Math.abs((snap.y - vorig.y) * z) > 0.2
+      || Math.abs(snap.z - vorig.z) > 0.0008
+      || Math.abs(snap.tilt - vorig.tilt) > 0.0008
+      || Math.abs(snap.draai - vorig.draai) > 0.0008;
 
-    // Lijnen, straatnamen, haltes, bussen
-    this.tekenLijnen(ctx, b);
-    if (this._zichtbareTegels) this.tekenStraatnamen(ctx, this._zichtbareTegels);
-    this.tekenPlaatsen(ctx);
-    this.tekenHaltes(ctx);
-    this.tekenSchepen(ctx);
-    this.tekenTreinen(ctx);
-    this.tekenVoertuigen(ctx);
+    if (this._bgVies || veranderd) {
+      const bgCtx = this.achtergrondCtx;
+      bgCtx.fillStyle = this.colors.bg;
+      bgCtx.fillRect(0, 0, this.vw, this.vh);
+
+      // Detailniveau bepaalt welk tegelniveau we ophalen. Hoe platter de
+      // kanteling, hoe meer kaart er in beeld past, dus dat telt mee.
+      const detail = z * Math.sqrt(this.tilt / 0.55);
+      this.tekenTegels(bgCtx, b, detail);
+      this.tekenLijnen(bgCtx, b);
+      if (this._zichtbareTegels) this.tekenStraatnamen(bgCtx, this._zichtbareTegels);
+      this.tekenPlaatsen(bgCtx);
+      this.tekenHaltes(bgCtx);
+
+      this._bgSnapshot = snap;
+      this._bgVies = false;
+    }
+
+    mainCtx.drawImage(this.achtergrondCanvas, 0, 0, this.vw, this.vh);
+
+    // Bewegende lagen: elk frame vers, maar samen ruim onder de 1ms
+    this.tekenSchepen(mainCtx);
+    this.tekenTreinen(mainCtx);
+    this.tekenVoertuigen(mainCtx);
   }
 
   /**

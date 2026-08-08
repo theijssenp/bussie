@@ -3,8 +3,11 @@
 // Koppelt de renderer aan de backend API.
 // ============================================================
 
-import { IsoRenderer } from './kaart.js';
-import { TegelBron } from './tegels.js';
+// De versie-query hier moet gelijk lopen met index.html's <script>-tags:
+// Cloudflare cachet /js/*.js hardnekkig op URL, en zonder query blijft deze
+// import — anders dan de <script>-tag zelf — op een oude cache hangen.
+import { IsoRenderer } from './kaart.js?v=17';
+import { TegelBron } from './tegels.js?v=17';
 
 // ---------------------------------------------------------------------------
 // Boot
@@ -56,7 +59,7 @@ async function loadMap() {
     tegelBron = new TegelBron('/data/tegels');
     await tegelBron.laadIndex();
     renderer.setTegelBron(tegelBron);
-    tegelBron.opGeladen = () => renderer.render();
+    tegelBron.opGeladen = () => { renderer.markeerAchtergrondVies(); renderer.render(); };
     bootProgress(35, 'Buslijnen laden…');
   } catch (err) {
     bootMsg.textContent = 'Kaartdata niet beschikbaar';
@@ -243,6 +246,7 @@ function updateLijnFilter() {
 
   lijnFilterDiv.querySelector('.filter-reset')?.addEventListener('click', () => {
     renderer.filteredLines.clear();
+    renderer.markeerAchtergrondVies();
     updateLijnFilter();
   });
 
@@ -252,6 +256,7 @@ function updateLijnFilter() {
       if (renderer.filteredLines.has(lijn)) renderer.filteredLines.delete(lijn);
       else renderer.filteredLines.add(lijn);
       if (renderer.filteredLines.size === activeLines.size) renderer.filteredLines.clear();
+      renderer.markeerAchtergrondVies();
       updateLijnFilter();
       updateBusoverzicht();
     });

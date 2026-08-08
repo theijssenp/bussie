@@ -92,7 +92,13 @@ def init_db(conn):
             timestamp INTEGER NOT NULL,
             stored_at INTEGER NOT NULL
         );
-        
+
+        -- vehicle_id bevat de datum (bv. "2026-08-08:QBUZZ:g510:7033"), dus
+        -- elke nieuwe dag krijgt elk voertuig een nieuwe primary key. Zonder
+        -- opruiming (zie ruim_op) blijven oude dagen hier voor altijd staan.
+        CREATE INDEX IF NOT EXISTS idx_latest_timestamp ON latest_vehicles(timestamp);
+        CREATE INDEX IF NOT EXISTS idx_latest_stored_at ON latest_vehicles(stored_at);
+
         CREATE TABLE IF NOT EXISTS route_traces (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             lijn TEXT NOT NULL,
@@ -112,13 +118,20 @@ def ruim_op(conn, dagen=3):
     Landelijk komt er ongeveer een half GB per dag bij. Drie dagen is ruim
     genoeg voor waar de historie voor dient: routes reconstrueren en bij het
     laden de vorige positie kennen.
+
+    latest_vehicles moet hier ook in mee: vehicle_id bevat de datum, dus
+    zonder opruiming stapelen oude dagen zich op als dode rijen die de
+    /api/voertuigen/db-query (het hete pad, elke poll) blijft meescannen.
     """
     grens = int(time.time()) - dagen * 86400
     cur = conn.execute("DELETE FROM vehicle_positions WHERE stored_at < ?", (grens,))
-    conn.commit()
     weg = cur.rowcount
-    if weg > 0:
-        log.info("Opgeruimd: %d posities ouder dan %d dagen", weg, dagen)
+    cur2 = conn.execute("DELETE FROM latest_vehicles WHERE stored_at < ?", (grens,))
+    weg_latest = cur2.rowcount
+    conn.commit()
+    if weg > 0 or weg_latest > 0:
+        log.info("Opgeruimd: %d posities en %d laatste-posities ouder dan %d dagen",
+                 weg, weg_latest, dagen)
     return weg
 
 
