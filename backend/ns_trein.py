@@ -27,8 +27,13 @@ STATIONS_ENDPOINT = BASIS + "/nsapp-stations/v3"
 RIT_ENDPOINT = BASIS + "/reisinformatie-api/api/v2/journey?train="
 INTERVAL = 30  # seconden tussen ophalingen — het is een gedeelde sleutel, niet gulzig zijn
 
-# Een trein die drie ophaalrondes niets van zich laat horen valt van de kaart
-VERVALTIJD = 3 * INTERVAL
+# Anders dan bussen is een treinstel een uniek, herkenbaar voertuig uit een
+# beperkte vloot, en de feed heeft geregeld gaten: bij elke ronde vallen er
+# een paar treinen even weg om daarna weer op te duiken. Met een korte
+# vervaltijd knippert de kaart daarvan. Daarom houden we een trein een stuk
+# langer vast op zijn laatst bekende plek; de frontend laat hem vervagen
+# naarmate de melding ouder wordt, zodat zichtbaar blijft wat oude data is.
+VERVALTIJD = 10 * 60
 
 # De stationslijst verandert hooguit een paar keer per jaar
 STATIONS_VERVAL = 24 * 3600

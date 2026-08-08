@@ -30,6 +30,20 @@ const MAX_BUSKANTELING = Math.PI / 6;
 // stap te doen — vandaar dat twee vingers niet meer wegschieten.
 const ZOOM_PER_PIXEL = 0.0011;
 
+// Rastercel (meters) van de spoorindex waarmee treinen op het spoor worden
+// getrokken, en hoe ver een trein maximaal van een spoor mag liggen om er
+// nog aan vastgeklikt te worden. Ruimer dan dit is meestal geen meetfout
+// meer maar een spoor dat we niet in de tegels hebben (of buitenland).
+// Vanaf deze ouderdom (s) begint een treinmelding te vervagen, en bij de
+// tweede waarde is hij zo flauw als hij wordt. Zo blijft een trein staan
+// waar hij het laatst gezien is, zonder te doen alsof het live is.
+const TREIN_VERS = 60;
+const TREIN_OUD = 420;
+const TREIN_MIN_ALPHA = 0.35;
+
+const SPOOR_CEL = 400;
+const SPOOR_SNAP = 150;
+
 // Vanaf deze snelheid (km/u) krijgt een voertuig een sliert achter zich
 const SLIERT_VANAF = 45;
 
@@ -97,6 +111,8 @@ export class IsoRenderer {
     this.schepen = [];
     this.hoveredTrein = null;
     this.treinen = [];
+    this._spoorIndex = null;   // rastercel → platte lijst spoorsegmenten
+    this._spoorSig = '';       // welke tegels er in de index zitten
     this.stations = [];
 
     // Theme colors
@@ -668,19 +684,118 @@ export class IsoRenderer {
     }));
   }
 
-  /** Waar rijdt deze trein nu, doorgerekend vanaf de laatste melding. */
+  /**
+   * Rasterindex van alle spoorsegmenten die nu in beeld zijn, zodat we per
+   * trein niet door alle rails hoeven te lopen. Wordt alleen herbouwd als
+   * er andere tegels in beeld staan.
+   */
+  _zorgSpoorIndex() {
+    const tegels = this._zichtbareTegels;
+    if (!tegels || !tegels.length) {
+      this._spoorIndex = null;
+      this._spoorSig = '';
+      return;
+    }
+    let sig = '';
+    for (const t of tegels) sig += t.niveau + '/' + t.tx + ',' + t.ty + ';';
+    if (sig === this._spoorSig) return;
+    this._spoorSig = sig;
+
+    const raster = new Map();
+    for (const t of tegels) {
+      for (const el of t.rails || []) {
+        const p = el.pts;
+        for (let i = 0; i + 3 < p.length; i += 2) {
+          const x1 = p[i], y1 = p[i + 1], x2 = p[i + 2], y2 = p[i + 3];
+          // In elke cel zetten die het segment raakt, anders mist een
+          // lang segment de cel waar de trein toevallig in zit.
+          const cx0 = Math.floor(Math.min(x1, x2) / SPOOR_CEL);
+          const cx1 = Math.floor(Math.max(x1, x2) / SPOOR_CEL);
+          const cy0 = Math.floor(Math.min(y1, y2) / SPOOR_CEL);
+          const cy1 = Math.floor(Math.max(y1, y2) / SPOOR_CEL);
+          for (let cx = cx0; cx <= cx1; cx++) {
+            for (let cy = cy0; cy <= cy1; cy++) {
+              const sleutel = cx + ',' + cy;
+              let lijst = raster.get(sleutel);
+              if (!lijst) raster.set(sleutel, lijst = []);
+              lijst.push(x1, y1, x2, y2);
+            }
+          }
+        }
+      }
+    }
+    this._spoorIndex = raster;
+  }
+
+  /** Het dichtstbijzijnde punt op een spoor, of null als er geen in de buurt ligt. */
+  spoorPunt(x, y, maxAfstand) {
+    const raster = this._spoorIndex;
+    if (!raster) return null;
+    const cx = Math.floor(x / SPOOR_CEL), cy = Math.floor(y / SPOOR_CEL);
+    let besteD = maxAfstand * maxAfstand;
+    let bx = 0, by = 0, bhoek = 0, gevonden = false;
+
+    for (let ox = -1; ox <= 1; ox++) {
+      for (let oy = -1; oy <= 1; oy++) {
+        const lijst = raster.get((cx + ox) + ',' + (cy + oy));
+        if (!lijst) continue;
+        for (let i = 0; i < lijst.length; i += 4) {
+          const x1 = lijst[i], y1 = lijst[i + 1];
+          const dx = lijst[i + 2] - x1, dy = lijst[i + 3] - y1;
+          const len2 = dx * dx + dy * dy;
+          if (!len2) continue;
+          let t = ((x - x1) * dx + (y - y1) * dy) / len2;
+          t = t < 0 ? 0 : t > 1 ? 1 : t;
+          const px = x1 + t * dx, py = y1 + t * dy;
+          const d = (x - px) * (x - px) + (y - py) * (y - py);
+          if (d < besteD) {
+            besteD = d;
+            bx = px; by = py;
+            bhoek = Math.atan2(dy, dx);
+            gevonden = true;
+          }
+        }
+      }
+    }
+    return gevonden ? { x: bx, y: by, hoek: bhoek } : null;
+  }
+
+  /**
+   * Waar rijdt deze trein nu, doorgerekend vanaf de laatste melding.
+   *
+   * De NS peilt maar eens per halve minuut, dus tussendoor rekenen we met
+   * koers en snelheid door. Dat is een rechte lijn, en een spoor is dat
+   * zelden: door een bocht belandt een trein zo honderden meters naast de
+   * baan. Daarom trekken we de uitkomst naar het dichtstbijzijnde spoor
+   * uit de tegels, en nemen we meteen de richting van dat spoor over.
+   */
   positieVanTrein(trein) {
     const verstreken = Math.min(45, Date.now() / 1000 - trein._gezien);
-    if (!trein.snelheid || trein.koers === null || trein.koers === undefined) {
-      return { x: trein._wx, y: trein._wy };
+    let x = trein._wx, y = trein._wy;
+    let hoek = koersNaarWereld(trein.koers);
+
+    if (trein.snelheid && trein.koers !== null && trein.koers !== undefined) {
+      const afstand = (trein.snelheid / 3.6) * verstreken;   // km/u → m/s
+      const rad = trein.koers * Math.PI / 180;
+      // Koers is een kompaspeiling: 0 = noord, met de klok mee
+      x += Math.sin(rad) * afstand;
+      y -= Math.cos(rad) * afstand;
     }
-    const afstand = (trein.snelheid / 3.6) * verstreken;   // km/u → m/s
-    const rad = trein.koers * Math.PI / 180;
-    // Koers is een kompaspeiling: 0 = noord, met de klok mee
-    return {
-      x: trein._wx + Math.sin(rad) * afstand,
-      y: trein._wy - Math.cos(rad) * afstand,
-    };
+
+    const op = this.spoorPunt(x, y, SPOOR_SNAP);
+    if (op) {
+      x = op.x;
+      y = op.y;
+      // Een spoorsegment heeft geen rijrichting; kies de kant die het
+      // best bij de gemelde koers past, anders rijdt de helft achteruit.
+      if (hoek !== null && hoek !== undefined) {
+        const verschil = Math.cos(op.hoek - hoek);
+        hoek = verschil >= 0 ? op.hoek : op.hoek + Math.PI;
+      } else {
+        hoek = op.hoek;
+      }
+    }
+    return { x, y, hoek };
   }
 
   tekenTreinen(ctx) {
@@ -697,6 +812,8 @@ export class IsoRenderer {
 
     const stippen = z < STIP_ZOOM && !metGebouwen;
     const perKleur = new Map();
+    const nu = Date.now() / 1000;
+    this._zorgSpoorIndex();
 
     for (const trein of this.treinen) {
       const pos = this.positieVanTrein(trein);
@@ -708,7 +825,7 @@ export class IsoRenderer {
       trein._sx = p.x;
       trein._sy = p.y;
       const kleur = TREIN_KLEUREN[trein.soort] || TREIN_KLEUREN.trein;
-      const hoek = this.schermHoek(koersNaarWereld(trein.koers));
+      const hoek = this.schermHoek(pos.hoek);
 
       if (stippen) {
         const lijst = perKleur.get(kleur);
@@ -718,9 +835,20 @@ export class IsoRenderer {
       }
       // Een intercity is langer dan een sprinter
       const bakken = trein.soort === 'intercity' ? 3 : 2;
-      this.tekenSliert(ctx, p.x, p.y, hoek, trein.snelheid, schaal, kleur);
+      // Hoe ouder de melding, hoe flauwer: een trein blijft staan waar hij
+      // het laatst gezien is, maar doet niet alsof dat nog live is.
+      const leeftijd = nu - trein.t;
+      const vaag = leeftijd > TREIN_VERS;
+      if (vaag) {
+        const deel = Math.min(1, (leeftijd - TREIN_VERS) / (TREIN_OUD - TREIN_VERS));
+        ctx.save();
+        ctx.globalAlpha = 1 - deel * (1 - TREIN_MIN_ALPHA);
+      }
+      // Een stilstaande melding van minuten oud verdient geen snelheidsveeg
+      if (!vaag) this.tekenSliert(ctx, p.x, p.y, hoek, trein.snelheid, schaal, kleur);
       this.tekenTrein(ctx, p.x, p.y, schaal, hoek,
                       this.hoveredTrein === trein, kleur, bakken);
+      if (vaag) ctx.restore();
     }
 
     // Ver uitgezoomd: een streepje in de rijrichting in plaats van een stip.
