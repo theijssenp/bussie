@@ -23,6 +23,17 @@ const STIP_ZOOM = 0.5;
 // Zover mag een busje maximaal meekantelen met de weg (30°)
 const MAX_BUSKANTELING = Math.PI / 6;
 
+// Hoeveel zoom één beeldpunt scrollen oplevert. Een muiswieltje stuurt
+// ongeveer 100 pixels per klik; daarmee komt één klik op ~12% zoom uit,
+// net als voorheen. Een trackpad stuurt tientallen véél kleinere events
+// per veeg, en die schalen nu evenredig mee in plaats van elk een volle
+// stap te doen — vandaar dat twee vingers niet meer wegschieten.
+const ZOOM_PER_PIXEL = 0.0011;
+
+// Eén enkel event mag nooit meer dan dit doen; sommige muizen en
+// kinetisch doorrollende trackpads sturen ineens honderden pixels.
+const ZOOM_STAP_MAX = 120;
+
 // Lijnen zonder eigen kleur in de GTFS krijgen deze; hun bussen houden
 // de standaard okerkleur, want een grijs busje leest niet als een bus.
 const LIJN_STANDAARDKLEUR = '#8aa0b2';
@@ -1648,7 +1659,14 @@ export class IsoRenderer {
 
     canvas.addEventListener('wheel', (e) => {
       e.preventDefault();
-      this.zoomAt(e.clientX, e.clientY, e.deltaY < 0 ? 1.12 : 0.89);
+      // deltaY komt in pixels, regels of pagina's binnen — eerst gelijktrekken
+      let delta = e.deltaY;
+      if (e.deltaMode === 1) delta *= 33;          // regels
+      else if (e.deltaMode === 2) delta *= this.vh; // pagina's
+      delta = Math.max(-ZOOM_STAP_MAX, Math.min(ZOOM_STAP_MAX, delta));
+      // Exponentieel: even ver scrollen zoomt overal even veel, en twee
+      // kleine stapjes doen samen precies zoveel als één grote.
+      this.zoomAt(e.clientX, e.clientY, Math.exp(-delta * ZOOM_PER_PIXEL));
     }, { passive: false });
 
     // Touch
