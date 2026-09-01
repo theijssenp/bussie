@@ -438,10 +438,23 @@ class BussieHandler(BaseHTTPRequestHandler):
 
     def _send_json(self, data, status=200, cache="public, max-age=30"):
         body = json.dumps(data).encode("utf-8")
+
+        # De voertuigenlijst is rauw meer dan een megabyte en gaat naar elke
+        # bezoeker opnieuw over de uplink — Cloudflare cachet hem niet, want
+        # hij verandert elke twintig seconden. Gezipt blijft er een achtste
+        # van over, en dat is precies het stuk waar het bootscherm op wacht.
+        gezipt = False
+        if len(body) > 1024 and self._wil_gzip():
+            body = gziplib.compress(body, 6)
+            gezipt = True
+
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Cache-Control", cache)
+        if gezipt:
+            self.send_header("Content-Encoding", "gzip")
+            self.send_header("Vary", "Accept-Encoding")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
