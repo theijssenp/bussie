@@ -451,8 +451,13 @@ def genereer():
     for r in lijnen:
         r.pop("cum", None)
 
-    with open(OUT_PATH, "w", encoding="utf-8") as f:
+    # Via een tijdelijk bestand: de draaiende backend bouwt lijnen.bin
+    # opnieuw zodra lijnen.json nieuwer is, en die mag daarbij nooit een
+    # half weggeschreven bestand aantreffen.
+    tijdelijk = OUT_PATH + ".tmp"
+    with open(tijdelijk, "w", encoding="utf-8") as f:
         json.dump(uitvoer, f, separators=(",", ":"), ensure_ascii=False)
+    os.replace(tijdelijk, OUT_PATH)
 
     mb = os.path.getsize(OUT_PATH) / 1024 / 1024
     log.info("Opgeslagen: %s (%.1f MB)", OUT_PATH, mb)

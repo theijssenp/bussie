@@ -489,12 +489,28 @@ class BussieHandler(BaseHTTPRequestHandler):
         # bij élk eerste bezoek opnieuw gemaakt worden — dus bewaren we het
         # resultaat tot het bestand zelf verandert.
         gezipt = gzip_ok and self._wil_gzip() and st.st_size > 1024
+
+        # Uit tijdstempel en lengte, niet uit de inhoud: 5 MB hashen per
+        # verzoek zou het middel erger maken dan de kwaal. De codering hoort
+        # erbij, anders krijgt wie het gezipte antwoord bewaarde een 304 op
+        # zijn vraag om het ongezipte.
+        etag = '"%x-%x%s"' % (st.st_mtime_ns, st.st_size, "-gz" if gezipt else "")
+        if self.headers.get("If-None-Match") == etag:
+            self.send_response(304)
+            self.send_header("ETag", etag)
+            self.send_header("Cache-Control", cache)
+            if gezipt:
+                self.send_header("Vary", "Accept-Encoding")
+            self.end_headers()
+            return
+
         body = _bestand_cache(path, st, gezipt)
 
         self.send_response(200)
         self.send_header("Content-Type", content_type)
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Cache-Control", cache)
+        self.send_header("ETag", etag)
         if gezipt:
             self.send_header("Content-Encoding", "gzip")
             self.send_header("Vary", "Accept-Encoding")
