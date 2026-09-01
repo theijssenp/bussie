@@ -7,13 +7,14 @@ filtert per stad/operator, en serveert compacte JSON.
 
 import urllib.request
 import urllib.error
+import gzip as gziplib
 import json
 import time
 import threading
 import logging
 import os
 import sys
-from collections import defaultdict
+from collections import defaultdict, OrderedDict
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 
@@ -366,6 +367,70 @@ def poll_loop():
 # HTTP Server
 # ---------------------------------------------------------------------------
 
+# Statische bestanden die net gevraagd zijn, blijven even klaarliggen — in de
+# vorm waarin ze de deur uitgaan, dus gezipt als de browser dat aankan. Dat
+# scheelt vooral bij de lijnenbundel: die inpakken kost een halve seconde en
+# elke eerste bezoeker vroeg erom. Tegels passen er ook in, maar er zijn er
+# honderdduizenden, dus het geheel zit aan een budget vast en het minst
+# recent gevraagde valt er als eerste uit.
+_CACHE_BUDGET = 64 * 1024 * 1024
+_cache = OrderedDict()          # (pad, gezipt) → ((mtime_ns, grootte), body)
+_cache_bytes = 0
+_cache_lock = threading.Lock()
+_bouw_lock = threading.Lock()   # voor het eenmalig bouwen van lijnen.bin
+
+
+def _bestand_cache(path, st, gezipt):
+    """De bytes van dit bestand zoals ze verstuurd worden, uit de cache of vers."""
+    global _cache_bytes
+    sleutel = (path, gezipt)
+    stempel = (st.st_mtime_ns, st.st_size)
+
+    with _cache_lock:
+        gevonden = _cache.get(sleutel)
+        if gevonden and gevonden[0] == stempel:
+            _cache.move_to_end(sleutel)
+            return gevonden[1]
+
+    with open(path, "rb") as f:
+        body = f.read()
+    if gezipt:
+        body = gziplib.compress(body, 6)
+
+    with _cache_lock:
+        oud = _cache.pop(sleutel, None)
+        if oud:
+            _cache_bytes -= len(oud[1])
+        _cache[sleutel] = (stempel, body)
+        _cache_bytes += len(body)
+        while _cache_bytes > _CACHE_BUDGET and len(_cache) > 1:
+            _, weg = _cache.popitem(last=False)
+            _cache_bytes -= len(weg[1])
+
+    return body
+
+
+def _lijnen_bin_pad():
+    """Pad naar lijnen.bin; bouw hem als hij ontbreekt of achterloopt."""
+    json_pad = os.path.join(DATA_DIR, "lijnen.json")
+    bin_pad = os.path.join(DATA_DIR, "lijnen.bin")
+    if not os.path.exists(json_pad):
+        return bin_pad if os.path.exists(bin_pad) else None
+
+    vers = (os.path.exists(bin_pad)
+            and os.path.getmtime(bin_pad) >= os.path.getmtime(json_pad))
+    if not vers:
+        with _bouw_lock:
+            # Twee gelijktijdige eerste bezoekers moeten niet allebei bouwen.
+            vers = (os.path.exists(bin_pad)
+                    and os.path.getmtime(bin_pad) >= os.path.getmtime(json_pad))
+            if not vers:
+                from lijn_routes import schrijf_binair
+                log.info("lijnen.bin bouwen uit lijnen.json...")
+                schrijf_binair(json_pad, bin_pad)
+    return bin_pad
+
+
 class BussieHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         # Stiller dan default
@@ -385,18 +450,18 @@ class BussieHandler(BaseHTTPRequestHandler):
         return "gzip" in self.headers.get("Accept-Encoding", "")
 
     def _send_file(self, path, content_type, cache="public, max-age=600", gzip_ok=True):
-        if not os.path.exists(path):
+        try:
+            st = os.stat(path)
+        except OSError:
             self.send_error(404)
             return
-        with open(path, "rb") as f:
-            body = f.read()
 
-        # Kaartdata is coördinaten; die comprimeren met een factor 4.
-        gezipt = False
-        if gzip_ok and len(body) > 1024 and self._wil_gzip():
-            import gzip as _gzip
-            body = _gzip.compress(body, 6)
-            gezipt = True
+        # Kaartdata is coördinaten; die comprimeren met een factor 4. Voor de
+        # lijnenbundel is dat een halve seconde rekenwerk, en die zou anders
+        # bij élk eerste bezoek opnieuw gemaakt worden — dus bewaren we het
+        # resultaat tot het bestand zelf verandert.
+        gezipt = gzip_ok and self._wil_gzip() and st.st_size > 1024
+        body = _bestand_cache(path, st, gezipt)
 
         self.send_response(200)
         self.send_header("Content-Type", content_type)
@@ -709,6 +774,16 @@ class BussieHandler(BaseHTTPRequestHandler):
             lijn_path = os.path.join(DATA_DIR, "lijnen.json")
             if os.path.exists(lijn_path):
                 self._send_file(lijn_path, "application/json")
+            else:
+                self.send_error(404, "Lijnroutes nog niet gegenereerd — draai backend/lijn_routes.py")
+            return
+
+        if path == "/data/lijnen.bin":
+            # Wat de frontend ophaalt: dezelfde lijnen, maar binair — een
+            # derde van de bytes en geen 20 MB tekst om te ontleden.
+            bin_path = _lijnen_bin_pad()
+            if bin_path:
+                self._send_file(bin_path, "application/octet-stream")
             else:
                 self.send_error(404, "Lijnroutes nog niet gegenereerd — draai backend/lijn_routes.py")
             return

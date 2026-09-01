@@ -18,6 +18,7 @@ import json
 import logging
 import math
 import os
+import struct
 import sys
 import zipfile
 from collections import defaultdict
@@ -28,6 +29,7 @@ log = logging.getLogger("lijn-routes")
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data")
 GTFS_ZIP_PATH = os.path.join(DATA_DIR, "gtfs-nl.zip")
 OUT_PATH = os.path.join(DATA_DIR, "lijnen.json")
+BIN_PATH = os.path.join(DATA_DIR, "lijnen.bin")
 
 # Landelijk nulpunt — moet gelijk zijn aan tegels.py CENTER_NL, anders
 # liggen de lijnen niet op de kaart.
@@ -287,6 +289,94 @@ def afstand_langs(pts, cum, x, y):
     return beste_d
 
 
+# ---------------------------------------------------------------------------
+# Binair lijnformaat (BLN1)
+# ---------------------------------------------------------------------------
+#
+# Als JSON is dit bestand 20 MB, en dat is bij het eerste bezoek het enige
+# dat de kaart nog tegenhoudt. Binair blijft er 5 MB over (3 MB over de
+# lijn), en de browser hoeft geen 20 MB tekst te ontleden.
+#
+# Twee dingen doen het werk. De haltes staan één keer in een tabel in plaats
+# van gemiddeld twee keer per lijn die er stopt, en de punten van een route
+# staan als verschil met hun voorganger: twee bytes per stap in plaats van
+# een reeks cijfers. Coördinaten gaan in decimeters — de bron rondt toch al
+# op een decimeter af — en een sprong die niet in twee bytes past krijgt een
+# ontsnappingswaarde met de volle positie erachter.
+
+BIN_MAGIC = b"BLN1"
+SPRONG = -32768          # dx == dy == dit: hierna volgt een absolute positie
+
+
+def _tekst(b):
+    """Lengte in één byte, dan de bytes zelf. Alles hier past ruim."""
+    return struct.pack("<B", len(b)) + b
+
+
+def codeer_lijnen(lijnen):
+    """Zet de lijnroutes om naar het binaire formaat dat de browser leest."""
+    haltes = {}   # halte-id → (index, halte)
+    for r in lijnen:
+        for h in r.get("haltes", []):
+            if h["id"] not in haltes:
+                haltes[h["id"]] = (len(haltes), h)
+
+    uit = bytearray(BIN_MAGIC)
+
+    uit += struct.pack("<I", len(haltes))
+    for _, h in haltes.values():
+        uit += _tekst(h["id"].encode("utf-8"))
+        uit += _tekst(h["naam"].encode("utf-8"))
+        uit += struct.pack("<ii", round(h["x"] * 10), round(h["y"] * 10))
+
+    uit += struct.pack("<I", len(lijnen))
+    for r in lijnen:
+        uit += _tekst(r["lijn"].encode("utf-8"))
+        uit += struct.pack("<B", r["richting"])
+        uit += _tekst(r["naam"].encode("utf-8"))
+        uit += _tekst(r["bestemming"].encode("utf-8"))
+        uit += bytes.fromhex(r["kleur"].lstrip("#"))
+
+        rids = list(r.get("rids", []))
+        uit += struct.pack("<B", len(rids))
+        for rid in rids:
+            uit += _tekst(str(rid).encode("utf-8"))
+
+        punten = r["pts"]
+        uit += struct.pack("<I", len(punten))
+        vx = vy = 0
+        for i, (x, y) in enumerate(punten):
+            qx, qy = round(x * 10), round(y * 10)
+            if i == 0:
+                uit += struct.pack("<ii", qx, qy)
+            else:
+                dx, dy = qx - vx, qy - vy
+                if -32767 <= dx <= 32767 and -32767 <= dy <= 32767:
+                    uit += struct.pack("<hh", dx, dy)
+                else:
+                    uit += struct.pack("<hhii", SPRONG, SPRONG, qx, qy)
+            vx, vy = qx, qy
+
+        eigen = r.get("haltes", [])
+        uit += struct.pack("<H", len(eigen))
+        for h in eigen:
+            uit += struct.pack("<II", haltes[h["id"]][0], round(h["d"] * 10))
+
+    return bytes(uit)
+
+
+def schrijf_binair(json_pad=OUT_PATH, bin_pad=BIN_PATH):
+    """lijnen.json → lijnen.bin. Draait ook los van de zware generator."""
+    with open(json_pad, encoding="utf-8") as f:
+        lijnen = json.load(f).get("lijnen", [])
+    blob = codeer_lijnen(lijnen)
+    tijdelijk = bin_pad + ".tmp"
+    with open(tijdelijk, "wb") as f:
+        f.write(blob)
+    os.replace(tijdelijk, bin_pad)
+    return len(blob)
+
+
 def genereer():
     if not os.path.exists(GTFS_ZIP_PATH):
         log.error("GTFS zip ontbreekt: %s", GTFS_ZIP_PATH)
@@ -366,6 +456,11 @@ def genereer():
 
     mb = os.path.getsize(OUT_PATH) / 1024 / 1024
     log.info("Opgeslagen: %s (%.1f MB)", OUT_PATH, mb)
+
+    # De frontend haalt de binaire versie op; de JSON blijft als bron staan.
+    bin_bytes = schrijf_binair()
+    log.info("Opgeslagen: %s (%.1f MB)", BIN_PATH, bin_bytes / 1024 / 1024)
+
     log.info("  %d lijnroutes, %d punten, %d haltes",
              len(lijnen),
              sum(len(r["pts"]) for r in lijnen),
@@ -379,4 +474,9 @@ def nummer_sleutel(lijn):
 
 
 if __name__ == "__main__":
-    genereer()
+    if "--alleen-binair" in sys.argv:
+        # De zware kant (1,4 GB stop_times) overslaan en enkel lijnen.json
+        # opnieuw inpakken.
+        log.info("Opgeslagen: %s (%.1f MB)", BIN_PATH, schrijf_binair() / 1024 / 1024)
+    else:
+        genereer()

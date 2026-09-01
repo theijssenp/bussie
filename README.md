@@ -23,7 +23,7 @@ gtfs.ovapi.nl/nl/vehiclePositions.pb    ← Nederlandse open data (GTFS-RT proto
   backend/lijn_routes.py                 ← Eenmalige lijnroute generator
     - Eén route per lijn én richting uit de statische GTFS
     - Kleur uit routes.txt, haltes met afstand langs de route
-    - Output: data/lijnen.json
+    - Output: data/lijnen.json + data/lijnen.bin (binair, wat de kaart ophaalt)
                                          ↓
   frontend/js/kaart.js                  ← Canvas renderer
     - Eigen isometrische projectie (2:1 dimetrisch)
@@ -55,6 +55,9 @@ gtfs.ovapi.nl/nl/vehiclePositions.pb    ← Nederlandse open data (GTFS-RT proto
 - `GET /api/lijnen?stad=groningen` — actieve lijnen met bestemmingen
 - `GET /data/groningen.json` — statische kaartdata
 - `GET /data/lijnen.json` — lijnroutes met kleur, haltes en afstanden
+- `GET /data/lijnen.bin` — dezelfde lijnroutes binair (BLN1); dit haalt de
+  kaart op, want het is een derde van de bytes en er valt geen 20 MB tekst
+  te ontleden. Wordt zo nodig uit `lijnen.json` gebouwd bij de eerste vraag.
 
 ## Installatie
 
@@ -68,13 +71,15 @@ gtfs.ovapi.nl/nl/vehiclePositions.pb    ← Nederlandse open data (GTFS-RT proto
    python3 backend/tegels_nl.py     # PBF  → data/tegels/ (tegelpiramide)
    python3 backend/straatnamen.py   # PBF  → straatnamen per tegel (.lbl)
    python3 backend/steden.py        # PBF  → data/steden.json (plaatsenkiezer)
-   python3 backend/lijn_routes.py   # GTFS → data/lijnen.json (lijnroutes)
+   python3 backend/lijn_routes.py   # GTFS → data/lijnen.json + .bin (lijnroutes)
    ```
    Voor één stad kan het ook zonder PBF: `kaart_generator.py` haalt via
    Overpass een stadsgebied op, en `tegels.py` knipt dat in tegels.
 
    `lijn_routes.py` leest `data/gtfs-nl.zip`, dus draai dat opnieuw als de
-   dienstregeling wisselt (lijnen, kleuren of haltes veranderen dan).
+   dienstregeling wisselt (lijnen, kleuren of haltes veranderen dan). Met
+   `--alleen-binair` pakt hij alleen `lijnen.json` opnieuw in, zonder de
+   1,4 GB `stop_times` door te lezen.
    `tegels_nl.py` en `straatnamen.py` werken het bouwstempel in
    `data/tegels/index.json` bij, waardoor browsers hun cache verversen.
 

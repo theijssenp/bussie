@@ -6,8 +6,9 @@
 // De versie-query hier moet gelijk lopen met index.html's <script>-tags:
 // Cloudflare cachet /js/*.js hardnekkig op URL, en zonder query blijft deze
 // import — anders dan de <script>-tag zelf — op een oude cache hangen.
-import { IsoRenderer } from './kaart.js?v=30';
-import { TegelBron } from './tegels.js?v=30';
+import { IsoRenderer } from './kaart.js?v=31';
+import { TegelBron } from './tegels.js?v=31';
+import { decodeerLijnen } from './lijnen.js?v=31';
 
 // ---------------------------------------------------------------------------
 // Boot
@@ -49,7 +50,6 @@ let tegelBron = null;
 let vehicles = [];
 let activeLines = new Map();   // lijn → {bestemming, count, kleur}
 let lijnKleuren = new Map();   // lijn → kleur uit de GTFS
-let lijnenGeladen = null;      // belofte: de lijnenlaag is binnen
 
 async function loadMap() {
   try {
@@ -67,22 +67,27 @@ async function loadMap() {
     return;
   }
 
-  // Lijnroutes: geometrie, kleuren en haltes per lijn en richting.
-  // Landelijk is dit 12 MB, dus we wachten er niet op: de kaart komt eerst
-  // in beeld en de lijnen schuiven er even later onder.
-  lijnenGeladen = (async () => {
+  // Lijnroutes: geometrie, kleuren en haltes per lijn en richting. Binair
+  // is dit 3 MB over de lijn, en dat is nog altijd verreweg het zwaarste
+  // dat er binnenkomt — dus we wachten er niet op. De kaart komt eerst in
+  // beeld, de openingsvlucht loopt al, en de lijnen schuiven er onder
+  // zodra ze er zijn.
+  (async () => {
     try {
-      const resp = await fetch('/data/lijnen.json');
+      const resp = await fetch('/data/lijnen.bin');
       if (!resp.ok) return;
-      const data = await resp.json();
-      renderer.setLijnen(data.lijnen || []);
-      for (const r of data.lijnen || []) {
+      const lijnen = decodeerLijnen(await resp.arrayBuffer());
+      renderer.setLijnen(lijnen);
+      for (const r of lijnen) {
         if (!lijnKleuren.has(r.lijn)) lijnKleuren.set(r.lijn, r.kleur);
       }
-      console.log(`${(data.lijnen || []).length} lijnroutes geladen`);
+      console.log(`${lijnen.length} lijnroutes geladen`);
       // Voertuigen die al binnen waren alsnog aan hun route koppelen
       if (vehicles.length) renderer.setVehicles(vehicles, null);
       updateLijnFilter();
+      renderer.markeerAchtergrondVies();
+      // De opening mikt op het busstation; dat weten we nu pas precies.
+      stelOpeningBij();
     } catch (err) {
       console.warn('Lijnroutes laden mislukt:', err);
     }
@@ -184,6 +189,7 @@ async function laadStations() {
     if (!resp.ok) return;
     const data = await resp.json();
     renderer.setStations(data.stations || []);
+    stelOpeningBij();
   } catch (err) {
     console.warn('Stations laden mislukt:', err);
   }
@@ -365,7 +371,15 @@ function vliegNaar(doel, eindZoom, duur) {
   requestAnimationFrame(stap);
 }
 
-/** Het busstation zoeken tussen de haltes; anders het stadscentrum. */
+/**
+ * Waar de opening op uitkomt: het liefst het midden van de busperrons bij
+ * het Hoofdstation, anders het treinstation, anders het stadscentrum.
+ *
+ * De perrons komen uit de lijnenbundel en die is de traagste van de drie —
+ * daar wachten we niet op. De vlucht vertrekt op de beste schatting die er
+ * dan is en wordt onderweg bijgesteld; de correctie is een paar honderd
+ * meter op een reis van kilometers, dus je ziet er niets van.
+ */
 function openingsDoel() {
   const perrons = renderer.haltes.filter(h => h.naam.includes('Groningen, Hoofdstation'));
   if (perrons.length) {
@@ -374,8 +388,14 @@ function openingsDoel() {
       y: perrons.reduce((n, h) => n + h.y, 0) / perrons.length,
     };
   }
+  const station = (renderer.stations || []).find(s => s.naam === 'Groningen');
+  if (station) return { x: station._wx, y: station._wy };
   return plaatsen.find(p => p.naam === 'Groningen') || null;
 }
+
+// Het punt waar de openingsvlucht op afkoerst. vliegNaar leest dit object
+// elke tekenbeurt opnieuw, dus bijstellen is een kwestie van erin schrijven.
+let openingDoel = null;
 
 function startOpening() {
   const stad = plaatsen.find(p => p.naam === 'Groningen');
@@ -388,7 +408,18 @@ function startOpening() {
   renderer.cam.y = renderer.targetCam.y = stad.y;
   renderer.cam.zoom = renderer.targetCam.zoom = OPENING.beginZoom;
 
-  vliegNaar(doel, OPENING.eindZoom, OPENING.duur);
+  openingDoel = { x: doel.x, y: doel.y };
+  vliegNaar(openingDoel, OPENING.eindZoom, OPENING.duur);
+}
+
+/** Een beter openingsdoel is binnen: de lopende vlucht meteen meebuigen. */
+function stelOpeningBij() {
+  if (!vluchtBezig || !openingDoel) return;
+  const doel = openingsDoel();
+  if (doel) {
+    openingDoel.x = doel.x;
+    openingDoel.y = doel.y;
+  }
 }
 
 /** Zodra iemand zelf de kaart aanraakt is de opening voorbij. */
@@ -983,15 +1014,18 @@ async function start() {
   await loadMap();
   await laadPlaatsen();
   // Stations verschuiven niet en hangen niet aan de buslijnen; meteen
-  // ophalen, niet pas na de 12 MB lijnengeometrie.
+  // ophalen, niet pas na de lijnengeometrie.
   laadStations();
   bootProgress(70, 'Realtime data ophalen…');
 
   await pollVehicles(true);
   bootProgress(95, 'Klaar…');
 
+  // De lijnenbundel is het zwaarste onderdeel en de kaart staat er niet op
+  // te wachten: de tegels en de bussen zijn binnen, dus we gaan in beeld en
+  // beginnen de openingsvlucht. De lijnen schuiven er tijdens die negen
+  // seconden vanzelf onder.
   renderLoop();
-  await lijnenGeladen;   // de opening mikt op het busstation, dus haltes nodig
   startOpening();
   setInterval(() => pollVehicles(), 20000);
 
