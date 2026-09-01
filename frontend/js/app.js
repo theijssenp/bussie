@@ -6,9 +6,9 @@
 // De versie-query hier moet gelijk lopen met index.html's <script>-tags:
 // Cloudflare cachet /js/*.js hardnekkig op URL, en zonder query blijft deze
 // import — anders dan de <script>-tag zelf — op een oude cache hangen.
-import { IsoRenderer } from './kaart.js?v=31';
-import { TegelBron } from './tegels.js?v=31';
-import { decodeerLijnen } from './lijnen.js?v=31';
+import { IsoRenderer } from './kaart.js?v=32';
+import { TegelBron } from './tegels.js?v=32';
+import { decodeerLijnen } from './lijnen.js?v=32';
 
 // ---------------------------------------------------------------------------
 // Boot
@@ -72,28 +72,45 @@ async function loadMap() {
   // dat er binnenkomt — dus we wachten er niet op. De kaart komt eerst in
   // beeld, de openingsvlucht loopt al, en de lijnen schuiven er onder
   // zodra ze er zijn.
-  (async () => {
-    try {
-      const resp = await fetch('/data/lijnen.bin');
-      if (!resp.ok) return;
-      const lijnen = decodeerLijnen(await resp.arrayBuffer());
-      renderer.setLijnen(lijnen);
-      for (const r of lijnen) {
-        if (!lijnKleuren.has(r.lijn)) lijnKleuren.set(r.lijn, r.kleur);
-      }
-      console.log(`${lijnen.length} lijnroutes geladen`);
-      // Voertuigen die al binnen waren alsnog aan hun route koppelen
-      if (vehicles.length) renderer.setVehicles(vehicles, null);
-      updateLijnFilter();
-      renderer.markeerAchtergrondVies();
-      // De opening mikt op het busstation; dat weten we nu pas precies.
-      stelOpeningBij();
-    } catch (err) {
-      console.warn('Lijnroutes laden mislukt:', err);
-    }
-  })();
+  laadLijnen();
 
   bootProgress(55, 'Voertuigen laden…');
+}
+
+/**
+ * De lijnenbundel ophalen en onder de kaart schuiven.
+ *
+ * Niemand wacht hier nog op, en dat betekent dat een mislukking ook niemand
+ * opvalt: de kaart draait gewoon door, alleen zonder buslijnen en zonder
+ * haltes. Vandaar dat we het een paar keer opnieuw proberen, en de tweede
+ * poging langs de browsercache heen gaat — een kapot of leeg antwoord dat
+ * daar eenmaal in zit, zou anders blijven terugkomen.
+ */
+async function laadLijnen(poging = 1) {
+  try {
+    const resp = await fetch('/data/lijnen.bin', poging > 1 ? { cache: 'reload' } : undefined);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const lijnen = decodeerLijnen(await resp.arrayBuffer());
+
+    renderer.setLijnen(lijnen);
+    for (const r of lijnen) {
+      if (!lijnKleuren.has(r.lijn)) lijnKleuren.set(r.lijn, r.kleur);
+    }
+    console.log(`${lijnen.length} lijnroutes geladen`);
+    // Voertuigen die al binnen waren alsnog aan hun route koppelen
+    if (vehicles.length) renderer.setVehicles(vehicles, null);
+    updateLijnFilter();
+    renderer.markeerAchtergrondVies();
+    // De opening mikt op het busstation; dat weten we nu pas precies.
+    stelOpeningBij();
+  } catch (err) {
+    if (poging >= 3) {
+      console.warn('Lijnroutes laden mislukt, de kaart blijft zonder lijnen:', err);
+      return;
+    }
+    console.warn(`Lijnroutes laden mislukt (poging ${poging}), opnieuw:`, err);
+    setTimeout(() => laadLijnen(poging + 1), poging * 2000);
+  }
 }
 
 function kleurVan(lijn) {

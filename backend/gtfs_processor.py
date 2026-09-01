@@ -436,6 +436,21 @@ class BussieHandler(BaseHTTPRequestHandler):
         # Stiller dan default
         pass
 
+    def send_error(self, code, message=None, explain=None):
+        # Een fout mag nooit blijven plakken. BaseHTTPRequestHandler zet geen
+        # cache-headers op een foutpagina, en zonder die headers mogen
+        # Cloudflare en de browser zelf een bewaartermijn verzinnen. Een 404
+        # van één seconde — tijdens een herstart, of voordat lijnen.bin
+        # gegenereerd was — blijft dan uren hangen bij wie hem net ving.
+        self._fout = True
+        super().send_error(code, message, explain)
+
+    def end_headers(self):
+        if getattr(self, "_fout", False):
+            self.send_header("Cache-Control", "no-store")
+            self._fout = False
+        super().end_headers()
+
     def _send_json(self, data, status=200, cache="public, max-age=30"):
         body = json.dumps(data).encode("utf-8")
 
