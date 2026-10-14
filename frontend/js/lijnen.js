@@ -5,7 +5,7 @@
 // binair is het 5 MB die we hier in één keer doorlopen.
 // ============================================================
 
-const MAGIC = 0x314e4c42; // 'BLN1' little-endian gelezen als uint32
+const MAGIC = 0x324e4c42; // 'BLN2' little-endian gelezen als uint32
 const SPRONG = -32768;    // dx == dy == dit: er volgt een absolute positie
 
 /**
@@ -56,6 +56,10 @@ export function decodeerLijnen(buffer) {
       .map(c => c.toString(16).padStart(2, '0')).join('');
     o += 3;
 
+    // Het shape_id van deze vorm: hiermee koppelt de kaart een bus aan de
+    // route van zijn eigen rit in plaats van aan de hoofdvorm van de lijn.
+    const sid = tekst();
+
     const ridAantal = dv.getUint8(o);
     o += 1;
     const rids = new Array(ridAantal);
@@ -96,7 +100,7 @@ export function decodeerLijnen(buffer) {
       o += 8;
     }
 
-    lijnen[l] = { lijn, richting, naam, bestemming, kleur, rids, pts, haltes };
+    lijnen[l] = { lijn, richting, naam, bestemming, kleur, sid, rids, pts, haltes };
   }
 
   return lijnen;

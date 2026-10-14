@@ -45,6 +45,13 @@ DEFAULT_KLEUR = "#8aa0b2"
 # het verschil, en landelijk scheelt het tientallen procenten.
 SIMPLIFY_EPS = 4.0
 
+# Een lijn rijdt niet altijd dezelfde vorm: er zijn ritvarianten, spitsritten
+# die een lus overslaan en korte ritten die halverwege eindigen. We bewaren
+# naast de hoofdvorm elke variant die minstens dit deel van de ritten van die
+# lijn en richting rijdt; een bus krijgt via zijn shape_id de vorm van zijn
+# eigen rit. Lager zetten vindt meer omleidingen, maar maakt de bundel zwaarder.
+VARIANT_DREMPEL = 0.25
+
 
 def latlon_to_meters(lat, lon):
     """Web Mercator naar lokale meters — identiek aan kaart_generator.py."""
@@ -265,6 +272,7 @@ def bouw_route(info, shape_pts, halte_rijen, stops):
         "bestemming": info["bestemming"],
         "kleur": info["kleur"],
         "rids": sorted(info["rids"]),
+        "sid": info["shape_id"],
         "lengte": round(lengte, 1),
         "pts": pts,
         "cum": [round(c, 1) for c in cum],
@@ -304,7 +312,9 @@ def afstand_langs(pts, cum, x, y):
 # op een decimeter af — en een sprong die niet in twee bytes past krijgt een
 # ontsnappingswaarde met de volle positie erachter.
 
-BIN_MAGIC = b"BLN1"
+# BLN2 draagt per route ook het shape_id, zodat de kaart een bus aan de vorm
+# van zijn eigen rit kan koppelen in plaats van aan de hoofdvorm van de lijn.
+BIN_MAGIC = b"BLN2"
 SPRONG = -32768          # dx == dy == dit: hierna volgt een absolute positie
 
 
@@ -336,6 +346,8 @@ def codeer_lijnen(lijnen):
         uit += _tekst(r["naam"].encode("utf-8"))
         uit += _tekst(r["bestemming"].encode("utf-8"))
         uit += bytes.fromhex(r["kleur"].lstrip("#"))
+
+        uit += _tekst(str(r.get("sid", "")).encode("utf-8"))
 
         rids = list(r.get("rids", []))
         uit += struct.pack("<B", len(rids))
@@ -396,35 +408,43 @@ def genereer():
         # op lijnnúmmer kan niet: lijn 1 bestaat in Groningen, Amsterdam,
         # Rotterdam en Den Haag, en die zouden dan samenvallen tot één vorm.
         # Alleen het route_id is landelijk uniek.
-        kandidaten = {}  # (route_id, richting) → dict
+        vormen = defaultdict(dict)  # (route_id, richting) → {shape_id: ritten}
         for (route_id, richting, shape_id), aantal in tellingen.items():
             if shape_id not in shapes:
                 continue
-            r = routes[route_id]
-            if not r["lijn"]:
+            if not routes[route_id]["lijn"]:
                 continue
-            sleutel = (route_id, richting)
-            huidig = kandidaten.get(sleutel)
-            if huidig is None:
-                huidig = kandidaten[sleutel] = {
+            vormen[(route_id, richting)][shape_id] = aantal
+
+        # Per lijn en richting de hoofdvorm plus de noemenswaardige varianten.
+        # De hoofdvorm draagt het route_id en is waar een bus op terugvalt als
+        # we zijn rit niet kennen; een variant is alleen via zijn shape_id te
+        # vinden, zodat lijn 4 niet ineens langs de spitsroute gaat liggen.
+        kandidaten = []
+        for (route_id, richting), per_shape in vormen.items():
+            r = routes[route_id]
+            totaal = sum(per_shape.values())
+            hoofd = max(per_shape, key=lambda sid: (per_shape[sid], sid))
+            for shape_id, aantal in sorted(per_shape.items(),
+                                           key=lambda kv: (-kv[1], kv[0])):
+                if shape_id != hoofd and aantal < totaal * VARIANT_DREMPEL:
+                    continue
+                kandidaten.append({
                     "lijn": r["lijn"],
                     "richting": int(richting) if richting.isdigit() else 0,
                     "naam": r["naam"],
                     "kleur": r["kleur"],
                     "bestemming": voorbeeld[shape_id][1],
-                    "rids": set(),
+                    "rids": {route_id} if shape_id == hoofd else set(),
                     "shape_id": shape_id,
                     "aantal": aantal,
-                }
-            huidig["rids"].add(route_id)
-            if aantal > huidig["aantal"]:
-                huidig["aantal"] = aantal
-                huidig["shape_id"] = shape_id
-                huidig["bestemming"] = voorbeeld[shape_id][1]
+                })
 
-        log.info("  %d lijn/richting-combinaties", len(kandidaten))
+        varianten = sum(1 for k in kandidaten if not k["rids"])
+        log.info("  %d lijn/richting-combinaties, %d vormen (%d varianten)",
+                 len(vormen), len(kandidaten), varianten)
 
-        gekozen_trips = {voorbeeld[k["shape_id"]][0] for k in kandidaten.values()}
+        gekozen_trips = {voorbeeld[k["shape_id"]][0] for k in kandidaten}
         log.info("Haltevolgorde lezen (1,4 GB, dit duurt het langst)...")
         halte_rijen = lees_stop_times(zf, gekozen_trips)
 
@@ -433,7 +453,7 @@ def genereer():
         stops = lees_stops(zf, stop_ids)
 
     lijnen = []
-    for info in kandidaten.values():
+    for info in kandidaten:
         trip_id = voorbeeld[info["shape_id"]][0]
         route = bouw_route(info, shapes[info["shape_id"]], halte_rijen.get(trip_id, []), stops)
         if route:

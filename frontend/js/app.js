@@ -6,9 +6,9 @@
 // De versie-query hier moet gelijk lopen met index.html's <script>-tags:
 // Cloudflare cachet /js/*.js hardnekkig op URL, en zonder query blijft deze
 // import — anders dan de <script>-tag zelf — op een oude cache hangen.
-import { IsoRenderer } from './kaart.js?v=33';
+import { IsoRenderer } from './kaart.js?v=36';
 import { TegelBron } from './tegels.js?v=33';
-import { decodeerLijnen } from './lijnen.js?v=33';
+import { decodeerLijnen } from './lijnen.js?v=36';
 
 // ---------------------------------------------------------------------------
 // Boot
@@ -88,7 +88,11 @@ async function loadMap() {
  */
 async function laadLijnen(poging = 1) {
   try {
-    const resp = await fetch('/data/lijnen.bin', poging > 1 ? { cache: 'reload' } : undefined);
+    // De versie in de URL hoort bij het bundelformaat, niet bij de inhoud:
+    // Cloudflare houdt dit bestand vier uur vast, en zonder eigen URL krijgt
+    // een bezoeker na een formaatwijziging eerst de oude bundel en daarmee
+    // een lege kaart. Verandert het formaat in lijn_routes.py, hoog hem dan op.
+    const resp = await fetch('/data/lijnen.bin?v=36', poging > 1 ? { cache: 'reload' } : undefined);
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const lijnen = decodeerLijnen(await resp.arrayBuffer());
 

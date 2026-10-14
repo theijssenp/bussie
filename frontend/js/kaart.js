@@ -44,6 +44,16 @@ const TREIN_MIN_ALPHA = 0.35;
 const SPOOR_CEL = 400;
 const SPOOR_SNAP = 150;
 
+// Een bus hoort op zijn lijn te staan. Binnen ROUTE_SNAP meter koppelen we
+// hem eraan vast; eenmaal vastgeklikt laten we pas los boven ROUTE_LOS, want
+// anders knippert een bus die rond de grens zweeft tussen weg en route.
+const ROUTE_SNAP = 120;
+const ROUTE_LOS = 260;
+// Zoveel meter langs de route verzetten we zonder te glijden: een bus die
+// aan een nieuwe rit begint staat ineens aan de andere kant van de lijn, en
+// daar wil je hem niet met honderd kilometer per uur naartoe zien schuiven.
+const ROUTE_SPRONG = 1500;
+
 // Vanaf deze snelheid (km/u) krijgt een voertuig een sliert achter zich
 const SLIERT_VANAF = 45;
 
@@ -98,6 +108,7 @@ export class IsoRenderer {
     // Map data
     this.lijnen = [];           // lijnroutes uit lijnen.json
     this.lijnIndex = new Map(); // route_id|richting → lijnroute
+    this.shapeIndex = new Map(); // shape_id → de vorm van één rit
     this.haltes = [];           // unieke haltes van alle lijnen
     this.vehicles = [];
     this.filteredLines = new Set(); // leeg = alle lijnen
@@ -399,6 +410,7 @@ export class IsoRenderer {
   setLijnen(lijnen) {
     this.lijnen = lijnen || [];
     this.lijnIndex.clear();
+    this.shapeIndex.clear();
 
     for (const r of this.lijnen) {
       // Cumulatieve afstand langs de route. Die staat niet in het bestand —
@@ -415,6 +427,14 @@ export class IsoRenderer {
       // Zichtbaar deel: alleen wat binnen de kaartrand valt, opgeknipt in
       // losse stukken zodat een lijn niet dwars door leeg gebied doorloopt.
       r._segmenten = this.knipOpKaart(r.pts);
+      // Op shape_id vinden we de vorm van één specifieke rit; op route_id de
+      // hoofdvorm van de lijn. Varianten dragen geen route_id en komen dus
+      // alleen in de eerste index.
+      // Twee lijnen kunnen dezelfde vorm delen; dan houden we de vorm die
+      // een route_id draagt, zodat de bus bij zijn eigen lijn hoort.
+      if (r.sid && (!this.shapeIndex.has(r.sid) || (r.rids || []).length)) {
+        this.shapeIndex.set(r.sid, r);
+      }
       for (const rid of r.rids || []) {
         this.lijnIndex.set(`${rid}|${r.richting}`, r);
         if (!this.lijnIndex.has(rid)) this.lijnIndex.set(rid, r);
@@ -463,12 +483,16 @@ export class IsoRenderer {
 
   /** De lijnroute waar dit voertuig op rijdt (of null). */
   /**
-   * De lijnroute waar dit voertuig op rijdt. Alleen op route_id matchen:
-   * op lijnnummer zou lijn 1 uit Amsterdam aan lijn 1 uit Groningen worden
-   * gekoppeld, en dan glijdt een bus honderd kilometer verderop.
+   * De lijnroute waar dit voertuig op rijdt. Het shape_id van zijn rit is de
+   * beste bron: dat is precies de vorm die deze bus vandaag rijdt, inclusief
+   * de spitsvariant of de korte rit. Kennen we die niet, dan de hoofdvorm van
+   * de lijn. Alleen op route_id matchen en nooit op lijnnummer: op lijnnummer
+   * zou lijn 1 uit Amsterdam aan lijn 1 uit Groningen worden gekoppeld, en dan
+   * glijdt een bus honderd kilometer verderop.
    */
   routeVoor(v) {
     return (
+      (v.sid && this.shapeIndex.get(v.sid)) ||
       this.lijnIndex.get(`${v.rid}|${v.richting}`) ||
       this.lijnIndex.get(v.rid) ||
       null
@@ -502,8 +526,14 @@ export class IsoRenderer {
       const oud = this._buffer.get(v.id);
       const t = v.t || nu;
 
-      // Positie langs de route (of gewoon x/y als we geen route kennen)
-      const d = v._route ? this.afstandLangs(v._route, wx, wy, oud?.d) : null;
+      // Positie langs de route (of gewoon x/y als we geen route kennen).
+      // Zat deze bus al op zijn lijn vastgeklikt, dan mag de peiling verder
+      // afwijken voordat we hem loslaten: één slechte meting hoort hem niet
+      // van de weg te schoppen.
+      const vast = oud && oud.d !== null && oud.d !== undefined;
+      const d = v._route
+        ? this.afstandLangs(v._route, wx, wy, oud?.d, vast ? ROUTE_LOS : ROUTE_SNAP)
+        : null;
 
       let vorige = null;
       if (historie && historie[v.id]) {
@@ -915,8 +945,12 @@ export class IsoRenderer {
 
   // === Route-wiskunde ===
 
-  /** Afstand langs de route van het punt dat het dichtst bij (x,y) ligt. */
-  afstandLangs(route, x, y, hint) {
+  /**
+   * Afstand langs de route van het punt dat het dichtst bij (x,y) ligt.
+   * `maxAfstand` is hoe ver de peiling van de route mag liggen voordat we
+   * hem niet meer bij deze lijn vinden horen.
+   */
+  afstandLangs(route, x, y, hint, maxAfstand = ROUTE_SNAP) {
     const pts = route.pts;
     const cum = route.cum;
     let van = 0, tot = pts.length - 1;
@@ -945,8 +979,10 @@ export class IsoRenderer {
 
     // Te ver van de route af (omleiding, verkeerde shape): dan liever
     // in rechte lijn bewegen dan een bus 500 meter verkeerd neerzetten.
-    if (besteAfstand > 120) {
-      if (hint !== null && hint !== undefined) return this.afstandLangs(route, x, y, null);
+    if (besteAfstand > maxAfstand) {
+      if (hint !== null && hint !== undefined) {
+        return this.afstandLangs(route, x, y, null, maxAfstand);
+      }
       return null;
     }
     return besteD;
@@ -988,15 +1024,36 @@ export class IsoRenderer {
   /** Waar staat dit voertuig nú (met interpolatie tussen twee peilingen). */
   positieVan(v) {
     const buf = this._buffer.get(v.id);
-    if (!buf) return { x: v._wx, y: v._wy, hoek: null, voortgang: 1 };
+    if (!buf) {
+      if (v._route) {
+        const d = this.afstandLangs(v._route, v._wx, v._wy, null);
+        if (d !== null) {
+          const p = this.puntOpRoute(v._route, d);
+          return { x: p.x, y: p.y, hoek: p.hoek, d, voortgang: 1 };
+        }
+      }
+      return { x: v._wx, y: v._wy, hoek: null, voortgang: 1 };
+    }
 
     const verstreken = Date.now() / 1000 - buf.start;
     const reistijd = buf.reistijd || 20;
     const t = buf.vorige ? Math.max(0, Math.min(1, verstreken / reistijd)) : 1;
 
-    if (buf.route && buf.d !== null && buf.vorige && buf.vorige.d !== null && buf.d >= buf.vorige.d) {
-      // Glijden lángs de lijn — de bus volgt netjes de weg
-      const d = buf.vorige.d + (buf.d - buf.vorige.d) * t;
+    // Weten we waar deze bus op zijn lijn zit, dan zetten we hem dáár neer en
+    // nergens anders: ook bij zijn eerste peiling, en ook als de meting
+    // terugloopt. Tussen twee rauwe punten door slingeren haalt hem van de weg.
+    if (buf.route && buf.d !== null && buf.d !== undefined) {
+      let d = buf.d;
+      const van = buf.vorige ? buf.vorige.d : null;
+      if (van !== null && van !== undefined && Math.abs(buf.d - van) <= ROUTE_SPRONG) {
+        if (buf.d >= van) {
+          d = van + (buf.d - van) * t;        // glijden lángs de lijn
+        } else if (van - buf.d < 25) {
+          d = van;                            // GPS-geruis bij een halte
+        }
+        // Loopt hij verder terug, dan is het geen ruis maar een echte
+        // verplaatsing: meteen naar de nieuwe plek, nog altijd op de route.
+      }
       const p = this.puntOpRoute(buf.route, d);
       return { x: p.x, y: p.y, hoek: p.hoek, d, voortgang: t };
     }

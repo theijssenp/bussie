@@ -145,16 +145,23 @@ def load_static_gtfs():
                     }
             log.info("  %d stops geladen", len(STOP_CACHE))
 
-        # Trips (alleen route_id mapping — headsign is nuttig)
+        # Trips (alleen route_id mapping — headsign is nuttig). Het shape_id
+        # zegt welke vorm deze rit rijdt; daarmee legt de kaart een bus op de
+        # route van zijn eigen rit in plaats van op de hoofdvorm van de lijn.
+        # Een miljoen ritten delen dertienduizend vormen, dus we hergebruiken
+        # de string in plaats van hem een miljoen keer op te slaan.
         if "trips.txt" in zf.namelist():
+            shape_ids = {}
             with zf.open("trips.txt") as f:
                 reader = csv.DictReader(io.TextIOWrapper(f, encoding="utf-8"))
                 for row in reader:
                     trip_id = row.get("trip_id", "")
+                    shape_id = row.get("shape_id", "")
                     TRIP_CACHE[trip_id] = {
                         "route_id": row.get("route_id", ""),
                         "trip_headsign": row.get("trip_headsign", ""),
                         "direction_id": row.get("direction_id", ""),
+                        "shape_id": shape_ids.setdefault(shape_id, shape_id),
                     }
             log.info("  %d trips geladen", len(TRIP_CACHE))
 
@@ -251,6 +258,7 @@ def filter_vehicles(feed, city):
             "id": entity.id,
             "rid": route_id,
             "tid": trip_id,
+            "sid": trip_info.get("shape_id", ""),
             "lijn": line_number,
             "lat": round(lat, 5),
             "lon": round(lon, 5),
@@ -687,11 +695,15 @@ class BussieHandler(BaseHTTPRequestHandler):
                               AND timestamp >= ?
                             ORDER BY lijn
                         """, (cutoff,))
+                        # Het shape_id staat niet in de trace-db maar komt uit
+                        # de tripcache: die is altijd zo vers als de dienst-
+                        # regeling, ook voor rijen die er al even in staan.
                         vehicles = [{
                             "id": r[0], "tid": r[1], "rid": r[2], "lijn": r[3],
                             "richting": r[4], "bestemming": r[5],
                             "lat": r[6], "lon": r[7], "st": r[8],
                             "bearing": r[9], "snelheid": r[10], "lbl": r[11], "t": r[12],
+                            "sid": TRIP_CACHE.get(r[1], {}).get("shape_id", ""),
                         } for r in cursor.fetchall()]
 
                         if history:
