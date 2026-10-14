@@ -30,8 +30,9 @@ gtfs.ovapi.nl/nl/vehiclePositions.pb    ← Nederlandse open data (GTFS-RT proto
     - Eigen isometrische projectie (2:1 dimetrisch)
     - 3D gebouwextrusie met detailniveau per zoomstand
     - Lijnen in eigen kleur, haltes, busjes in zijaanzicht
-    - Bussen zitten vastgeklikt op hun lijn en glijden eroverheen
-      tussen twee peilingen
+    - Bussen zitten vastgeklikt op hun lijn, glijden eroverheen tussen twee
+      peilingen en worden daarna nog een halve minuut doorgerekend — de bron
+      publiceert maar eens per minuut
     - Pan/zoom/touch interaction
                                          ↓
   frontend/js/app.js                    ← App logic

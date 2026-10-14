@@ -53,6 +53,20 @@ const ROUTE_LOS = 260;
 // aan een nieuwe rit begint staat ineens aan de andere kant van de lijn, en
 // daar wil je hem niet met honderd kilometer per uur naartoe zien schuiven.
 const ROUTE_SPRONG = 1500;
+// Zo ver rekenen we een bus vooruit voorbij zijn laatste peiling. De bron
+// publiceert maar eens per minuut, dus zonder dit staat een bus altijd te
+// zien waar hij een minuut geleden was. Doorrekenen gebeurt lángs de lijn,
+// dus de rijrichting komt nog steeds uit de route en niet uit een gok; het
+// enige waar we naast kunnen zitten is hoe ver hij ondertussen is gekomen.
+const VOORUIT_MAX = 30;
+// Sneller dan dit rijdt geen stadsbus (108 km/u). Eén rare peiling zou een
+// bus anders kilometers verderop neerzetten.
+const VOORUIT_MAX_SNELHEID = 30;
+// Komt de schatting lager uit dan wat we net nog toonden, dan blijft de bus
+// liever even staan dan dat hij achteruit schuift — tot dit verschil. Groter
+// dan dit is geen correctie meer maar een echte verplaatsing (nieuwe rit), en
+// dan hoort hij wél te verspringen.
+const VOORUIT_DEMPING = 400;
 
 // Vanaf deze snelheid (km/u) krijgt een voertuig een sliert achter zich
 const SLIERT_VANAF = 45;
@@ -107,6 +121,10 @@ export class IsoRenderer {
 
     // Map data
     this.lijnen = [];           // lijnroutes uit lijnen.json
+    // Verschil tussen de klok van de server en die van deze browser. Nodig
+    // om te weten hoe oud een peiling nú is; een browserklok die er een paar
+    // minuten naast zit zou het doorrekenen anders alle kanten op sturen.
+    this.klokVerschil = 0;
     this.lijnIndex = new Map(); // route_id|richting → lijnroute
     this.shapeIndex = new Map(); // shape_id → de vorm van één rit
     this.haltes = [];           // unieke haltes van alle lijnen
@@ -504,10 +522,12 @@ export class IsoRenderer {
    * bewegingsbuffer klaar. Als het voertuig een bekende lijnroute heeft
    * bewegen we langs die route (afstand langs de lijn), anders in rechte lijn.
    */
-  setVehicles(vehicles, historie) {
+  setVehicles(vehicles, historie, serverTijd) {
     this.vehicles = vehicles || [];
     const center = this.center;
     if (!center) return;
+
+    if (serverTijd) this.klokVerschil = serverTijd - Date.now() / 1000;
 
     const R = 6378137, n = Math.PI / 180, cosLat = Math.cos(center.lat * n);
     const naarWereld = (lat, lon) => [
@@ -561,6 +581,9 @@ export class IsoRenderer {
         start: nu,
         route: v._route,
         stil: false,
+        // Wat er op het scherm stond blijft gelden over de peiling heen; zonder
+        // dat zou elke nieuwe peiling de demping hieronder opnieuw beginnen.
+        getoond: oud ? oud.getoond : undefined,
       };
 
       // Snelheid en richting langs de route
@@ -1035,9 +1058,18 @@ export class IsoRenderer {
       return { x: v._wx, y: v._wy, hoek: null, voortgang: 1 };
     }
 
+    // De klok van de peilingen, niet die van de browser: een peiling is al
+    // tientallen seconden oud als hij binnenkomt, en als we de animatie pas
+    // bij ontvangst laten beginnen rijdt elke bus die vertraging nog eens
+    // helemaal over.
+    const nu = Date.now() / 1000 + this.klokVerschil;
+    const dt = buf.vorige && buf.vorige.t ? buf.t - buf.vorige.t : 0;
     const verstreken = Date.now() / 1000 - buf.start;
     const reistijd = buf.reistijd || 20;
-    const t = buf.vorige ? Math.max(0, Math.min(1, verstreken / reistijd)) : 1;
+    const t = buf.vorige
+      ? (dt > 0 ? Math.max(0, Math.min(1, (nu - buf.vorige.t) / dt))
+                : Math.max(0, Math.min(1, verstreken / reistijd)))
+      : 1;
 
     // Weten we waar deze bus op zijn lijn zit, dan zetten we hem dáár neer en
     // nergens anders: ook bij zijn eerste peiling, en ook als de meting
@@ -1054,6 +1086,8 @@ export class IsoRenderer {
         // Loopt hij verder terug, dan is het geen ruis maar een echte
         // verplaatsing: meteen naar de nieuwe plek, nog altijd op de route.
       }
+      d += this.vooruitLangsLijn(buf, nu, dt, van);
+      d = this.nietAchteruit(buf, d);
       const p = this.puntOpRoute(buf.route, d);
       return { x: p.x, y: p.y, hoek: p.hoek, d, voortgang: t };
     }
@@ -1067,6 +1101,46 @@ export class IsoRenderer {
     }
 
     return { x: buf.x, y: buf.y, hoek: null, d: buf.d, voortgang: 1 };
+  }
+
+  /**
+   * Hoeveel meter een bus sinds zijn laatste peiling vermoedelijk verder is.
+   *
+   * De bron publiceert eens per minuut, dus zonder dit staat elke bus te zien
+   * waar hij een minuut geleden was. We rekenen door met de snelheid die hij
+   * over het vorige stuk haalde, lángs zijn eigen lijn — de rijrichting komt
+   * dus nog steeds uit de route en blijft kloppen. Ruim begrensd, want het
+   * blijft een schatting: een bus die bij een halte staat hoort niet weg te
+   * zweven, en een bus die er al minuten uit ligt moet gewoon blijven staan.
+   */
+  vooruitLangsLijn(buf, nu, dt, van) {
+    if (!dt || dt <= 0 || van === null || van === undefined) return 0;
+    // Een bus die amper van zijn plek kwam staat stil, ook al reed hij over
+    // het vorige stuk nog hard. Zijn oude snelheid doorzetten zou hem van de
+    // halte af laten zweven.
+    if (buf.stil) return 0;
+    const voorbij = nu - buf.t;
+    if (voorbij <= 0) return 0;                  // nog tussen twee peilingen in
+    const snelheid = (buf.d - van) / dt;
+    // Stilstaand of achteruit: niets doen. Dat vangt meteen de bus af die bij
+    // een halte wacht — die had over het vorige stuk geen snelheid.
+    if (snelheid <= 0) return 0;
+    return Math.min(snelheid, VOORUIT_MAX_SNELHEID) * Math.min(voorbij, VOORUIT_MAX);
+  }
+
+  /**
+   * Hou de bus op zijn plek in plaats van hem terug te laten schuiven.
+   *
+   * Vooruitrekenen is een schatting, en een schatting wordt bijgesteld: komt
+   * de volgende peiling binnen terwijl we te ver vooruit zaten, dan zou de bus
+   * een stukje terugspringen. Een bus die even wacht leest als een bus die
+   * voor een stoplicht staat; een bus die achteruit schuift leest als een bug.
+   */
+  nietAchteruit(buf, d) {
+    const vorig = buf.getoond;
+    if (vorig !== undefined && d < vorig && vorig - d < VOORUIT_DEMPING) d = vorig;
+    buf.getoond = d;
+    return d;
   }
 
   /** Snelheid in m/s zoals afgeleid uit de eigen metingen. */
