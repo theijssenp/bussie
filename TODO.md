@@ -70,15 +70,29 @@ geen TESO. Wat wel kan:
 
 ## Bussen op een omleiding
 
-Van de ~2.400 rijdende bussen liggen er zo'n 115 verder dan 120 meter van de
-route die we voor hun lijn bewaren — een ritvariant, een omleiding of een
-korte rit. Die bewegen in rechte lijn tussen twee peilingen. Op te lossen door
-meerdere shapes per lijn te bewaren en er per bus de dichtstbijzijnde bij te
-zoeken.
+Grotendeels opgelost: de bundel bewaart nu per lijn en richting ook de
+ritvarianten die minstens een kwart van de ritten rijden, en een bus wordt via
+het shape_id van zijn eigen rit aan de juiste vorm gekoppeld. Van de ~1.650
+rijdende bussen liggen er nog 80 verder dan 120 meter van hun vorm.
 
-## Service onder systemd
+Daarvan zitten er 45 al op de vorm van hun eigen rit en wijken ze daar echt
+van af: een omleiding van vandaag, een onbetrouwbare peiling, of een bus die
+iets anders rijdt dan zijn rit zegt. Voor de andere 28 bestaat de juiste vorm
+wel in de GTFS, maar die rijdt te weinig ritten om de drempel te halen.
+`VARIANT_DREMPEL` in `lijn_routes.py` op 0,05 zetten vangt ze bijna allemaal,
+maar laat de bundel groeien van 5,9 naar zo'n 10 MB — dat is de afweging.
 
-Draait nu als los proces en komt dus niet terug na een herstart van de
-machine. Eén keer draaien lost het op:
+## Wekelijkse verversing inschakelen
+
+`dienstregeling.sh`, `bussie-dienstregeling.service` en `.timer` staan klaar
+maar zijn nog niet geïnstalleerd. Eén keer draaien lost het op:
 
     sudo bash ~/hodc/bussie/update.sh
+
+Zonder die timer loopt de lijnenbundel weer achter zodra de dienstregeling
+wisselt, en dat is precies wat er in september en in oktober gebeurde: een
+derde van de bussen vond zijn lijn niet meer.
+
+De backend moet daar ook voor herstarten — hij houdt de route-, rit- en
+haltetabellen vast vanaf het moment dat hij startte, en met een tabel van
+vijf dagen oud mist twee derde van de bussen zijn bestemming.

@@ -1,0 +1,12 @@
+[Unit]
+Description=Bussie — dienstregeling verversen (GTFS + lijnroutes)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Het script zakt zelf naar het gebruikersaccount voor download en generatie;
+# root is alleen nodig om de backend te herstarten.
+ExecStart=/bin/bash /home/pieter/hodc/bussie/dienstregeling.sh
+# Downloaden en de hele stop_times doorlezen duurt een minuut of vijftien
+TimeoutStartSec=3600

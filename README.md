@@ -20,8 +20,9 @@ gtfs.ovapi.nl/nl/vehiclePositions.pb    ← Nederlandse open data (GTFS-RT proto
     - GTFS stops → bushaltes
     - Output: data/groningen.json
                                          ↓
-  backend/lijn_routes.py                 ← Eenmalige lijnroute generator
-    - Eén route per lijn én richting uit de statische GTFS
+  backend/lijn_routes.py                 ← Lijnroute generator (wekelijks)
+    - Hoofdvorm per lijn én richting uit de statische GTFS, plus de
+      ritvarianten die minstens een kwart van de ritten rijden
     - Kleur uit routes.txt, haltes met afstand langs de route
     - Output: data/lijnen.json + data/lijnen.bin (binair, wat de kaart ophaalt)
                                          ↓
@@ -29,7 +30,8 @@ gtfs.ovapi.nl/nl/vehiclePositions.pb    ← Nederlandse open data (GTFS-RT proto
     - Eigen isometrische projectie (2:1 dimetrisch)
     - 3D gebouwextrusie met detailniveau per zoomstand
     - Lijnen in eigen kleur, haltes, busjes in zijaanzicht
-    - Bussen glijden lángs hun lijn tussen twee peilingen
+    - Bussen zitten vastgeklikt op hun lijn en glijden eroverheen
+      tussen twee peilingen
     - Pan/zoom/touch interaction
                                          ↓
   frontend/js/app.js                    ← App logic
@@ -55,7 +57,7 @@ gtfs.ovapi.nl/nl/vehiclePositions.pb    ← Nederlandse open data (GTFS-RT proto
 - `GET /api/lijnen?stad=groningen` — actieve lijnen met bestemmingen
 - `GET /data/groningen.json` — statische kaartdata
 - `GET /data/lijnen.json` — lijnroutes met kleur, haltes en afstanden
-- `GET /data/lijnen.bin` — dezelfde lijnroutes binair (BLN1); dit haalt de
+- `GET /data/lijnen.bin` — dezelfde lijnroutes binair (BLN2); dit haalt de
   kaart op, want het is een derde van de bytes en er valt geen 20 MB tekst
   te ontleden. Wordt zo nodig uit `lijnen.json` gebouwd bij de eerste vraag.
 
@@ -76,20 +78,31 @@ gtfs.ovapi.nl/nl/vehiclePositions.pb    ← Nederlandse open data (GTFS-RT proto
    Voor één stad kan het ook zonder PBF: `kaart_generator.py` haalt via
    Overpass een stadsgebied op, en `tegels.py` knipt dat in tegels.
 
-   `lijn_routes.py` leest `data/gtfs-nl.zip`, dus draai dat opnieuw als de
-   dienstregeling wisselt (lijnen, kleuren of haltes veranderen dan). Met
-   `--alleen-binair` pakt hij alleen `lijnen.json` opnieuw in, zonder de
-   1,4 GB `stop_times` door te lezen.
+   `lijn_routes.py` leest `data/gtfs-nl.zip`, dus dat moet opnieuw als de
+   dienstregeling wisselt — en dat gebeurt vaker dan je denkt. Route_ids en
+   trip_ids lopen mee met de dienstregeling, dus een bundel van een maand oud
+   betekent dat een derde van de bussen zijn lijn niet meer vindt en in rechte
+   lijn over de kaart zweeft. `dienstregeling.sh` doet het wekelijks vanzelf
+   (zie stap 2); handmatig kan ook:
+
+   ```bash
+   sudo bash ~/hodc/bussie/dienstregeling.sh
+   ```
+
+   Met `--alleen-binair` pakt `lijn_routes.py` alleen `lijnen.json` opnieuw
+   in, zonder de 1,4 GB `stop_times` door te lezen.
    `tegels_nl.py` en `straatnamen.py` werken het bouwstempel in
    `data/tegels/index.json` bij, waardoor browsers hun cache verversen.
 
 2. Backend starten:
    ```bash
-   python3 backend/gtfs_processor.py
-   # Of als systemd service:
-   sudo cp bussie.service /etc/systemd/system/
-   sudo systemctl enable --now bussie
+   sudo bash update.sh
    ```
+   Dat zet de service neer, start hem, en schakelt meteen de wekelijkse
+   verversing van de dienstregeling in (`bussie-dienstregeling.timer`,
+   maandagnacht). Zonder die timer loopt de lijnenbundel stilletjes achter.
+
+   Los draaien kan ook: `python3 backend/gtfs_processor.py`
 
 3. Apache VirtualHost:
    ```bash

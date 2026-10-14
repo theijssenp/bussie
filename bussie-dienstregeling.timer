@@ -1,0 +1,13 @@
+[Unit]
+Description=Bussie — wekelijks de dienstregeling verversen
+
+[Timer]
+# Maandagnacht, als er toch bijna niemand kijkt. Route_ids wisselen met de
+# dienstregeling; wekelijks houdt de bundel vanzelf bij.
+OnCalendar=Mon *-*-* 03:30:00
+# Spreiden, en inhalen als de machine om 03:30 uit stond
+RandomizedDelaySec=1800
+Persistent=true
+
+[Install]
+WantedBy=timers.target

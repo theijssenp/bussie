@@ -30,15 +30,21 @@ else
     echo "     niets te stoppen"
 fi
 
-echo "2/5  Service-bestand plaatsen"
+echo "2/6  Service-bestanden plaatsen"
 install -m 644 "$MAP/bussie.service" /etc/systemd/system/bussie.service
+install -m 644 "$MAP/bussie-dienstregeling.service" /etc/systemd/system/
+install -m 644 "$MAP/bussie-dienstregeling.timer" /etc/systemd/system/
 systemctl daemon-reload
 
-echo "3/5  Inschakelen en starten"
+echo "3/6  Inschakelen en starten"
 systemctl enable bussie > /dev/null
 systemctl restart bussie
+# De wekelijkse verversing van de dienstregeling. Zonder deze loopt de
+# lijnenbundel stilletjes achter en zweeft na een maand een derde van de
+# bussen naast de weg.
+systemctl enable --now bussie-dienstregeling.timer > /dev/null
 
-echo "4/5  Wachten tot poort $POORT open is (hij parseert eerst de GTFS)"
+echo "4/6  Wachten tot poort $POORT open is (hij parseert eerst de GTFS)"
 for i in $(seq 1 90); do
     if ss -ltn 2>/dev/null | grep -q ":$POORT "; then
         echo "     open na ${i}s"
@@ -52,10 +58,11 @@ for i in $(seq 1 90); do
     sleep 1
 done
 
-echo "5/5  Controle"
+echo "5/6  Controle"
 systemctl reload apache2 2>/dev/null || true
 
 status=$(systemctl is-active bussie || true)
+timer=$(systemctl is-active bussie-dienstregeling.timer || true)
 voertuigen=$(curl -s --max-time 10 "http://localhost:$POORT/api/voertuigen/db" \
              | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('voertuigen',[])))" 2>/dev/null || echo "?")
 tegels=$(curl -s --max-time 10 -o /dev/null -w '%{http_code}' "http://localhost:$POORT/data/tegels/index.json" || echo "?")
@@ -63,9 +70,14 @@ extern=$(curl -s --max-time 20 -o /dev/null -w '%{http_code}' https://bussie.hod
 
 echo
 echo "  service      : $status (start voortaan mee bij een reboot)"
+echo "  verversing   : $timer (wekelijks, maandag 03:30)"
 echo "  voertuigen   : $voertuigen live"
 echo "  tegelindex   : HTTP $tegels"
 echo "  publieke site: HTTP $extern  → https://bussie.hodc.nl"
+echo
+
+echo "6/6  Eerstvolgende verversing"
+systemctl list-timers bussie-dienstregeling --no-pager | sed -n '2p' || true
 echo
 
 if [ "$status" = "active" ] && [ "$tegels" = "200" ]; then
