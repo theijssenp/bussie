@@ -276,6 +276,35 @@ def filter_vehicles(feed, city):
     return vehicles
 
 
+def gevraagd_gebied(qs):
+    """Het kaartgebied uit ?bbox=min_lat,min_lon,max_lat,max_lon, of None.
+
+    None betekent: alles. Dat is ook wat een oude frontend zonder bbox krijgt,
+    en wat een volledig uitgezoomde kaart vraagt. Een kapotte of onmogelijke
+    bbox behandelen we hetzelfde, in plaats van een lege kaart te sturen.
+    """
+    ruw = (qs.get("bbox") or [""])[0]
+    if not ruw:
+        return None
+    try:
+        min_lat, min_lon, max_lat, max_lon = (float(x) for x in ruw.split(","))
+    except ValueError:
+        return None
+    if not (-90 <= min_lat < max_lat <= 90 and -180 <= min_lon < max_lon <= 180):
+        return None
+    return (min_lat, min_lon, max_lat, max_lon)
+
+
+def binnen_gebied(gebied, item):
+    """Ligt dit voertuig, schip of deze trein in het gevraagde gebied?"""
+    if gebied is None:
+        return True
+    lat, lon = item.get("lat"), item.get("lon")
+    if lat is None or lon is None:
+        return False
+    return gebied[0] <= lat <= gebied[2] and gebied[1] <= lon <= gebied[3]
+
+
 _last_etag = None
 _last_modified = None
 
@@ -546,10 +575,16 @@ class BussieHandler(BaseHTTPRequestHandler):
             if SCHEEPVAART is None:
                 self._send_json({"v": 1, "schepen": [], "uit": True}, cache="no-store")
                 return
+            # Landelijk varen er zo'n zesduizend; een kaart van één stad ziet
+            # er een paar tientallen. Alleen die gaan over de lijn.
+            from urllib.parse import urlparse, parse_qs
+            gebied = gevraagd_gebied(parse_qs(urlparse(self.path).query))
+            alle = SCHEEPVAART.momentopname()
             self._send_json({
                 "v": 1,
                 "ts": int(time.time()),
-                "schepen": SCHEEPVAART.momentopname(),
+                "totaal": len(alle),
+                "schepen": [s for s in alle if binnen_gebied(gebied, s)],
             }, cache="public, max-age=10")
             return
 
@@ -562,10 +597,14 @@ class BussieHandler(BaseHTTPRequestHandler):
             if TREINEN is None:
                 self._send_json({"v": 1, "treinen": [], "uit": True}, cache="no-store")
                 return
+            from urllib.parse import urlparse, parse_qs
+            gebied = gevraagd_gebied(parse_qs(urlparse(self.path).query))
+            alle = TREINEN.momentopname()
             self._send_json({
                 "v": 1,
                 "ts": int(time.time()),
-                "treinen": TREINEN.momentopname(),
+                "totaal": len(alle),
+                "treinen": [t for t in alle if binnen_gebied(gebied, t)],
             }, cache="public, max-age=3")
             return
 
@@ -676,6 +715,8 @@ class BussieHandler(BaseHTTPRequestHandler):
             if city not in CITIES:
                 city = STANDAARD_GEBIED
             history = qs.get("history", ["0"])[0] == "2"
+            gebied = gevraagd_gebied(qs)
+            totaal = 0
             import trace_db as tdb
             if tdb._trace_db:
                 # data_ts = feed timestamp (verandert alleen als gtfs.ovapi nieuwe data stuurt)
@@ -705,6 +746,11 @@ class BussieHandler(BaseHTTPRequestHandler):
                             "bearing": r[9], "snelheid": r[10], "lbl": r[11], "t": r[12],
                             "sid": TRIP_CACHE.get(r[1], {}).get("shape_id", ""),
                         } for r in cursor.fetchall()]
+                        # Filteren in Python in plaats van in de query: het zijn
+                        # er een paar duizend en de query blijft zo eenvoudig.
+                        # Het landelijke totaal gaat mee voor de statusregel.
+                        totaal = len(vehicles)
+                        vehicles = [v for v in vehicles if binnen_gebied(gebied, v)]
 
                         if history:
                             # Haal voor elk voertuig ook de 1-na-laatste positie op.
@@ -728,8 +774,10 @@ class BussieHandler(BaseHTTPRequestHandler):
                                 )
                                 WHERE rn = 2
                             """, (cutoff,))
+                            in_beeld = {v["id"] for v in vehicles}
                             for row in cursor2:
-                                prev[row[0]] = {"lat": row[1], "lon": row[2], "t": row[3]}
+                                if row[0] in in_beeld:
+                                    prev[row[0]] = {"lat": row[1], "lon": row[2], "t": row[3]}
                 except Exception as e:
                     log.warning("Lezen uit trace db mislukt: %s", e)
                     vehicles = []
@@ -740,6 +788,7 @@ class BussieHandler(BaseHTTPRequestHandler):
                         "v": 2,
                         "ts": int(time.time()),
                         "data_ts": data_ts,
+                        "totaal": totaal,
                         "voertuigen": vehicles,
                         "historie": prev,
                     }, cache="public, max-age=30")
@@ -748,6 +797,7 @@ class BussieHandler(BaseHTTPRequestHandler):
                         "v": 1,
                         "ts": int(time.time()),
                         "data_ts": data_ts,
+                        "totaal": totaal,
                         "voertuigen": vehicles,
                     }, cache="public, max-age=30")
             else:

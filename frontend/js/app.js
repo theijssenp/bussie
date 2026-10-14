@@ -6,9 +6,9 @@
 // De versie-query hier moet gelijk lopen met index.html's <script>-tags:
 // Cloudflare cachet /js/*.js hardnekkig op URL, en zonder query blijft deze
 // import — anders dan de <script>-tag zelf — op een oude cache hangen.
-import { IsoRenderer } from './kaart.js?v=38';
+import { IsoRenderer } from './kaart.js?v=42';
 import { TegelBron } from './tegels.js?v=33';
-import { decodeerLijnen } from './lijnen.js?v=38';
+import { decodeerLijnen } from './lijnen.js?v=42';
 
 // ---------------------------------------------------------------------------
 // Boot
@@ -92,7 +92,7 @@ async function laadLijnen(poging = 1) {
     // Cloudflare houdt dit bestand vier uur vast, en zonder eigen URL krijgt
     // een bezoeker na een formaatwijziging eerst de oude bundel en daarmee
     // een lege kaart. Verandert het formaat in lijn_routes.py, hoog hem dan op.
-    const resp = await fetch('/data/lijnen.bin?v=38', poging > 1 ? { cache: 'reload' } : undefined);
+    const resp = await fetch('/data/lijnen.bin?v=42', poging > 1 ? { cache: 'reload' } : undefined);
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const lijnen = decodeerLijnen(await resp.arrayBuffer());
 
@@ -129,27 +129,131 @@ function binnenBeeld(v) {
 }
 
 // ---------------------------------------------------------------------------
+// Kaartgebied
+// ---------------------------------------------------------------------------
+//
+// Bussen, schepen en treinen halen we alleen op voor het stuk kaart waar je
+// naar kijkt, plus een ruime marge. Landelijk gaat het om zo'n 875 KB per
+// minuut; boven één stad om een paar procent daarvan.
+//
+// De marge is er niet voor de sier. Zonder marge duiken bussen aan de rand pas
+// op bij de volgende peiling, en verliest een bus die even buiten beeld rijdt
+// zijn vorige punt — en daarmee het glijden langs zijn lijn.
+//
+// De randen liggen op een vast raster, zodat een klein stukje schuiven niet
+// telkens een nieuw verzoek wordt, en twee bezoekers die naar dezelfde stad
+// kijken precies hetzelfde vragen.
+
+const GEBIED_RASTER = 0.25;     // graden
+const GEBIED_MARGE = 0.5;       // deel van het beeld dat er aan elke kant bij komt
+const GEBIED_MAX_LAT = 2.5;     // ver uitgezoomd: dan gewoon alles, dat scheelt niets
+const GEBIED_MAX_LON = 4;
+
+const ALLES = { key: '', alles: true };
+let gebied = null;              // wat er laatst gevraagd is
+
+/** Het kaartgebied dat bij het huidige beeld hoort, met marge en op het raster. */
+function gewenstGebied() {
+  if (!renderer.center) return ALLES;
+  const b = renderer.viewportBounds();
+  const mx = (b.maxX - b.minX) * GEBIED_MARGE;
+  const my = (b.maxY - b.minY) * GEBIED_MARGE;
+  const a = renderer.wereldNaarLatLon(b.minX - mx, b.minY - my);
+  const c = renderer.wereldNaarLatLon(b.maxX + mx, b.maxY + my);
+  const r = GEBIED_RASTER;
+  const minLat = Math.floor(Math.min(a.lat, c.lat) / r) * r;
+  const maxLat = Math.ceil(Math.max(a.lat, c.lat) / r) * r;
+  const minLon = Math.floor(Math.min(a.lon, c.lon) / r) * r;
+  const maxLon = Math.ceil(Math.max(a.lon, c.lon) / r) * r;
+  if (maxLat - minLat > GEBIED_MAX_LAT || maxLon - minLon > GEBIED_MAX_LON) return ALLES;
+  return {
+    key: [minLat, minLon, maxLat, maxLon].map(g => g.toFixed(2)).join(','),
+    minLat, minLon, maxLat, maxLon,
+  };
+}
+
+/** Querystring-deel voor dit gebied; leeg betekent alles. */
+function gebiedParam(g, scheiding) {
+  return g && g.key ? `${scheiding}bbox=${g.key}` : '';
+}
+
+/** Valt het beeld (zonder marge) nog helemaal binnen wat we hebben opgehaald? */
+function beeldBinnen(g) {
+  if (g.alles) return true;
+  const b = renderer.viewportBounds();
+  const a = renderer.wereldNaarLatLon(b.minX, b.minY);
+  const c = renderer.wereldNaarLatLon(b.maxX, b.maxY);
+  return Math.min(a.lat, c.lat) >= g.minLat && Math.max(a.lat, c.lat) <= g.maxLat
+      && Math.min(a.lon, c.lon) >= g.minLon && Math.max(a.lon, c.lon) <= g.maxLon;
+}
+
+function oppervlak(g) {
+  return g.alles ? Infinity : (g.maxLat - g.minLat) * (g.maxLon - g.minLon);
+}
+
+/**
+ * Elke halve seconde kijken of het opgehaalde gebied nog past. Pas als het
+ * beeld een halve seconde stil ligt, zodat een vlucht naar een andere stad
+ * niet onderweg tien verzoeken afvuurt.
+ */
+let vorigGewenst = null;
+function bewaakGebied() {
+  if (!gebied) return;
+  const w = gewenstGebied();
+  const stabiel = vorigGewenst && w.key === vorigGewenst.key;
+  vorigGewenst = w;
+  if (!stabiel || w.key === gebied.key) return;
+
+  const nodig =
+    gebied.alles !== w.alles ||                 // in- of uitgezoomd voorbij de grens
+    !beeldBinnen(gebied) ||                     // buiten de marge geschoven
+    oppervlak(gebied) > 6 * oppervlak(w);       // flink ingezoomd: kan veel kleiner
+  if (!nodig) return;
+
+  gebied = w;
+  pollVehicles(false, true);
+  pollSchepen();
+  pollTreinen();
+}
+
+// Landelijke totalen voor de statusregel: wat er rijdt, niet wat er in beeld is
+let totalen = { bussen: 0, treinen: 0, schepen: 0 };
+
+// ---------------------------------------------------------------------------
 // Realtime polling
 // ---------------------------------------------------------------------------
 
 let lastDataTs = 0;
+let lastGebiedKey = null;
 
-async function pollVehicles(initial) {
+async function pollVehicles(initial, nieuwGebied) {
   try {
-    const url = initial ? '/api/voertuigen/db?history=2' : '/api/voertuigen/db';
+    if (!gebied) gebied = gewenstGebied();
+    const g = gebied;
+    // Bij een nieuw gebied ook de voorlaatste peilingen: bussen die daar
+    // opduiken rijden dan meteen, in plaats van een minuut stil te staan.
+    const metHistorie = initial || nieuwGebied;
+    const url = '/api/voertuigen/db' + (metHistorie ? '?history=2' : '')
+              + gebiedParam(g, metHistorie ? '&' : '?');
     const resp = await fetch(url);
     if (!resp.ok) return;
     const data = await resp.json();
 
+    // Intussen naar een ander gebied gegaan? Dan is dit antwoord achterhaald.
+    if (g !== gebied) return;
+
     // Niets veranderd? Dan de bewegingsbuffer met rust laten.
-    if (!initial && data.data_ts && data.data_ts === lastDataTs) {
+    if (!metHistorie && data.data_ts && data.data_ts === lastDataTs && g.key === lastGebiedKey) {
       updateStatusregel();
       return;
     }
     lastDataTs = data.data_ts || 0;
+    lastGebiedKey = g.key;
     vehicles = data.voertuigen || [];
+    // Een backend zonder gebiedsfilter stuurt geen totaal; dan is alles het totaal
+    totalen.bussen = data.totaal ?? vehicles.length;
 
-    renderer.setVehicles(vehicles, initial ? data.historie : null, data.ts);
+    renderer.setVehicles(vehicles, metHistorie ? data.historie : null, data.ts);
 
     activeLines.clear();
     for (const v of vehicles) {
@@ -176,10 +280,14 @@ let schepen = [];
 
 async function pollSchepen() {
   try {
-    const resp = await fetch('/api/schepen');
+    if (!gebied) gebied = gewenstGebied();
+    const g = gebied;
+    const resp = await fetch('/api/schepen' + gebiedParam(g, '?'));
     if (!resp.ok) return;
     const data = await resp.json();
+    if (g !== gebied) return;
     schepen = data.schepen || [];
+    totalen.schepen = data.totaal ?? schepen.length;
     renderer.setSchepen(schepen);
   } catch (err) {
     console.warn('Schepen ophalen mislukt:', err);
@@ -194,10 +302,14 @@ let treinen = [];
 
 async function pollTreinen() {
   try {
-    const resp = await fetch('/api/treinen');
+    if (!gebied) gebied = gewenstGebied();
+    const g = gebied;
+    const resp = await fetch('/api/treinen' + gebiedParam(g, '?'));
     if (!resp.ok) return;
     const data = await resp.json();
+    if (g !== gebied) return;
     treinen = data.treinen || [];
+    totalen.treinen = data.totaal ?? treinen.length;
     renderer.setTreinen(treinen);
   } catch (err) {
     console.warn('Treinen ophalen mislukt:', err);
@@ -217,9 +329,9 @@ async function laadStations() {
 }
 
 function updateStatusregel() {
-  const delen = [`${vehicles.length} bussen`];
-  if (treinen.length) delen.push(`${treinen.length} treinen`);
-  if (schepen.length) delen.push(`${schepen.length} schepen`);
+  const delen = [`${totalen.bussen} bussen`];
+  if (totalen.treinen) delen.push(`${totalen.treinen} treinen`);
+  if (totalen.schepen) delen.push(`${totalen.schepen} schepen`);
   document.getElementById('laden').textContent =
     `${delen.join(' · ')} live · bijgewerkt ${new Date().toLocaleTimeString('nl-NL')}`;
 }
@@ -418,16 +530,27 @@ function openingsDoel() {
 // elke tekenbeurt opnieuw, dus bijstellen is een kwestie van erin schrijven.
 let openingDoel = null;
 
-function startOpening() {
+/**
+ * De camera boven Groningen zetten, waar de openingsvlucht begint. Gebeurt al
+ * vóór de eerste opvraging van de bussen: we halen alleen op wat in beeld is,
+ * en bij het laden staat de camera nog boven het midden van het land.
+ */
+function plaatsOpening() {
   const stad = plaatsen.find(p => p.naam === 'Groningen');
-  const doel = openingsDoel();
-  if (!stad || !doel) return;
-
-  // Meteen boven Groningen staan, daarna pas bewegen. De afstand is klein,
-  // dus de dip valt vanzelf weg: dit is een pure inzoombeweging.
+  if (!stad) return null;
   renderer.cam.x = renderer.targetCam.x = stad.x;
   renderer.cam.y = renderer.targetCam.y = stad.y;
   renderer.cam.zoom = renderer.targetCam.zoom = OPENING.beginZoom;
+  return stad;
+}
+
+function startOpening() {
+  const doel = openingsDoel();
+  if (!doel) return;
+
+  // Meteen boven Groningen staan, daarna pas bewegen. De afstand is klein,
+  // dus de dip valt vanzelf weg: dit is een pure inzoombeweging.
+  if (!plaatsOpening()) return;
 
   openingDoel = { x: doel.x, y: doel.y };
   vliegNaar(openingDoel, OPENING.eindZoom, OPENING.duur);
@@ -537,10 +660,10 @@ const DRUKTE_CEL = 600;   // meter; het raster waarin we bussen tellen
  * buurstad hoort. Is er maar één bus dichtbij, dan is dat nog altijd een
  * betere plek om te landen dan het geometrische middelpunt.
  */
-function druksteplek(plaats) {
+function druksteplek(plaats, lijst = vehicles) {
   const straal = ZOEKSTRAAL[plaats.soort] || 5000;
   const dichtbij = [];
-  for (const v of vehicles) {
+  for (const v of lijst) {
     const x = v._dispWx !== undefined ? v._dispWx : v._wx;
     const y = v._dispWy !== undefined ? v._dispWy : v._wy;
     if (x === undefined) continue;
@@ -589,18 +712,42 @@ function druksteplek(plaats) {
   return beste;
 }
 
-function gaNaar(plaats) {
+/**
+ * De bussen rond een plaats, ook als die ver buiten het huidige kaartgebied
+ * ligt — we halen immers alleen op wat in beeld is. Lukt het niet, dan valt
+ * gaNaar terug op het middelpunt van de plaats.
+ */
+async function bussenRond(plaats) {
+  const straal = ZOEKSTRAAL[plaats.soort] || 5000;
+  const { lat, lon } = renderer.wereldNaarLatLon(plaats.x, plaats.y);
+  const dLat = straal / 111000;
+  const dLon = straal / (111000 * Math.cos(lat * Math.PI / 180));
+  const bbox = [lat - dLat, lon - dLon, lat + dLat, lon + dLon].map(g => g.toFixed(3)).join(',');
+  try {
+    // Kort houden: de vlucht wacht hierop, en een backend die even vastzit
+    // mag niet betekenen dat er na een klik niets gebeurt.
+    const resp = await fetch(`/api/voertuigen/db?bbox=${bbox}`, { signal: AbortSignal.timeout(1500) });
+    if (!resp.ok) return [];
+    const lijst = (await resp.json()).voertuigen || [];
+    for (const v of lijst) [v._wx, v._wy] = renderer.latLonNaarWereld(v.lat, v.lon);
+    return lijst;
+  } catch {
+    return [];
+  }
+}
+
+async function gaNaar(plaats) {
   if (!plaats) return;
   stopOpening();
+  sluitSteden();
 
-  const druk = druksteplek(plaats);
+  const druk = druksteplek(plaats, await bussenRond(plaats));
   if (druk) {
     vliegNaar(druk, Math.max(plaats.zoom || 2, 3.0));
     console.log(`${plaats.naam}: ${druk.aantal} bussen op de drukste plek`);
   } else {
     vliegNaar(plaats, plaats.zoom || 2);
   }
-  sluitSteden();
 }
 
 function sluitSteden() {
@@ -1039,7 +1186,12 @@ async function start() {
   laadStations();
   bootProgress(70, 'Realtime data ophalen…');
 
-  await pollVehicles(true);
+  plaatsOpening();
+  // Niet eindeloos op de bussen wachten: zit de backend vast (een lange
+  // databasebewerking houdt het slot), dan blijft de bezoeker anders naar het
+  // laadscherm kijken. Na vijf seconden gaat de kaart hoe dan ook open; de
+  // bussen schuiven erin zodra ze er zijn.
+  await Promise.race([pollVehicles(true), new Promise(r => setTimeout(r, 5000))]);
   bootProgress(95, 'Klaar…');
 
   // De lijnenbundel is het zwaarste onderdeel en de kaart staat er niet op
@@ -1057,6 +1209,7 @@ async function start() {
   // Treinen: de backend ververst elke 5s bij de NS, dus even vaak navragen.
   pollTreinen();
   setInterval(pollTreinen, 5000);
+  setInterval(bewaakGebied, 500);
 
   // De zijbalk toont afstanden tot de volgende halte — die lopen mee.
   setInterval(() => { if (overzichtOpen) updateBusoverzicht(); }, 5000);

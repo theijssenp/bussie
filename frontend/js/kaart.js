@@ -558,9 +558,11 @@ export class IsoRenderer {
         : null;
 
       let vorige = null;
-      if (historie && historie[v.id]) {
-        // Bij de eerste lading: gebruik de voorlaatste peiling uit de database
-        // zodat de bussen meteen bewegen in plaats van 20 seconden stil te staan.
+      if (historie && historie[v.id] && !oud) {
+        // Bij de eerste lading, of voor een bus die in een nieuw kaartgebied
+        // opduikt: de voorlaatste peiling uit de database, zodat hij meteen
+        // rijdt in plaats van een minuut stil te staan. Een bus die we al
+        // volgen houdt zijn eigen vorige punt, anders begint hij opnieuw.
         const h = historie[v.id];
         const [hx, hy] = naarWereld(h.lat, h.lon);
         vorige = {
@@ -572,7 +574,7 @@ export class IsoRenderer {
       }
 
       // Niets veranderd? Buffer laten staan, anders begint de bus opnieuw.
-      if (oud && !historie && Math.abs(oud.x - wx) < 8 && Math.abs(oud.y - wy) < 8) {
+      if (oud && Math.abs(oud.x - wx) < 8 && Math.abs(oud.y - wy) < 8) {
         oud.stil = true;
         continue;
       }
@@ -1593,6 +1595,24 @@ export class IsoRenderer {
       ctx.lineWidth = 0.6;
       ctx.stroke();
     }
+  }
+
+  /** Wereldmeters → lat/lon; het omgekeerde van wat setVehicles doet. */
+  wereldNaarLatLon(x, y) {
+    const R = 6378137, n = Math.PI / 180, c = this.center;
+    return {
+      lat: c.lat - y / (n * R),
+      lon: c.lon + x / (n * R * Math.cos(c.lat * n)),
+    };
+  }
+
+  /** Lat/lon → wereldmeters, op dezelfde manier als setVehicles. */
+  latLonNaarWereld(lat, lon) {
+    const R = 6378137, n = Math.PI / 180, c = this.center;
+    return [
+      (lon - c.lon) * n * R * Math.cos(c.lat * n),
+      -(lat - c.lat) * n * R,
+    ];
   }
 
   viewportBounds() {
