@@ -535,6 +535,8 @@ export class IsoRenderer {
       -(lat - center.lat) * n * R,
     ];
     const nu = Date.now() / 1000;
+    // De klok van de server, want de peilingstijdstempels horen daarbij
+    const nuEcht = nu + this.klokVerschil;
 
     for (const v of this.vehicles) {
       if (v.lat === undefined || v.lon === undefined) continue;
@@ -581,6 +583,7 @@ export class IsoRenderer {
         start: nu,
         route: v._route,
         stil: false,
+        vooruit: 0,
         // Wat er op het scherm stond blijft gelden over de peiling heen; zonder
         // dat zou elke nieuwe peiling de demping hieronder opnieuw beginnen.
         getoond: oud ? oud.getoond : undefined,
@@ -594,6 +597,17 @@ export class IsoRenderer {
           : Math.hypot(wx - vorige.x, wy - vorige.y);
         entry.snelheid = afstand / dt;
         entry.reistijd = dt;
+
+        // Hoe ver is hij sinds deze peiling alweer gekomen? De bron publiceert
+        // eens per minuut en de peiling is bij aankomst al tientallen seconden
+        // oud; zonder deze voorsprong rijdt elke bus die vertraging nog eens
+        // helemaal over. Het blijft een schatting, dus ruim begrensd, en alleen
+        // vóóruit langs de eigen lijn — de rijrichting komt van de route.
+        if (d !== null && vorige.d !== null && d >= vorige.d) {
+          const ouderdom = Math.max(0, nuEcht - t);
+          entry.vooruit = Math.min(entry.snelheid, VOORUIT_MAX_SNELHEID)
+                        * Math.min(ouderdom, VOORUIT_MAX);
+        }
       }
 
       this._buffer.set(v.id, entry);
@@ -1062,31 +1076,29 @@ export class IsoRenderer {
     // tientallen seconden oud als hij binnenkomt, en als we de animatie pas
     // bij ontvangst laten beginnen rijdt elke bus die vertraging nog eens
     // helemaal over.
-    const nu = Date.now() / 1000 + this.klokVerschil;
-    const dt = buf.vorige && buf.vorige.t ? buf.t - buf.vorige.t : 0;
     const verstreken = Date.now() / 1000 - buf.start;
     const reistijd = buf.reistijd || 20;
-    const t = buf.vorige
-      ? (dt > 0 ? Math.max(0, Math.min(1, (nu - buf.vorige.t) / dt))
-                : Math.max(0, Math.min(1, verstreken / reistijd)))
-      : 1;
+    const t = buf.vorige ? Math.max(0, Math.min(1, verstreken / reistijd)) : 1;
 
     // Weten we waar deze bus op zijn lijn zit, dan zetten we hem dáár neer en
     // nergens anders: ook bij zijn eerste peiling, en ook als de meting
     // terugloopt. Tussen twee rauwe punten door slingeren haalt hem van de weg.
     if (buf.route && buf.d !== null && buf.d !== undefined) {
-      let d = buf.d;
+      // Begin- en eindpunt dragen allebei hun eigen voorsprong, zodat het
+      // tráject opschuift en de bus onderweg blijft in plaats van bij het
+      // eindpunt stil te vallen.
+      let d = buf.d + (buf.vooruit || 0);
       const van = buf.vorige ? buf.vorige.d : null;
-      if (van !== null && van !== undefined && Math.abs(buf.d - van) <= ROUTE_SPRONG) {
-        if (buf.d >= van) {
-          d = van + (buf.d - van) * t;        // glijden lángs de lijn
-        } else if (van - buf.d < 25) {
-          d = van;                            // GPS-geruis bij een halte
+      const vanaf = van !== null && van !== undefined ? van + (buf.vorige.vooruit || 0) : null;
+      if (vanaf !== null && Math.abs(d - vanaf) <= ROUTE_SPRONG) {
+        if (d >= vanaf) {
+          d = vanaf + (d - vanaf) * t;        // glijden lángs de lijn
+        } else if (vanaf - d < 25) {
+          d = vanaf;                          // GPS-geruis bij een halte
         }
         // Loopt hij verder terug, dan is het geen ruis maar een echte
         // verplaatsing: meteen naar de nieuwe plek, nog altijd op de route.
       }
-      d += this.vooruitLangsLijn(buf, nu, dt, van);
       d = this.nietAchteruit(buf, d);
       const p = this.puntOpRoute(buf.route, d);
       return { x: p.x, y: p.y, hoek: p.hoek, d, voortgang: t };
@@ -1101,31 +1113,6 @@ export class IsoRenderer {
     }
 
     return { x: buf.x, y: buf.y, hoek: null, d: buf.d, voortgang: 1 };
-  }
-
-  /**
-   * Hoeveel meter een bus sinds zijn laatste peiling vermoedelijk verder is.
-   *
-   * De bron publiceert eens per minuut, dus zonder dit staat elke bus te zien
-   * waar hij een minuut geleden was. We rekenen door met de snelheid die hij
-   * over het vorige stuk haalde, lángs zijn eigen lijn — de rijrichting komt
-   * dus nog steeds uit de route en blijft kloppen. Ruim begrensd, want het
-   * blijft een schatting: een bus die bij een halte staat hoort niet weg te
-   * zweven, en een bus die er al minuten uit ligt moet gewoon blijven staan.
-   */
-  vooruitLangsLijn(buf, nu, dt, van) {
-    if (!dt || dt <= 0 || van === null || van === undefined) return 0;
-    // Een bus die amper van zijn plek kwam staat stil, ook al reed hij over
-    // het vorige stuk nog hard. Zijn oude snelheid doorzetten zou hem van de
-    // halte af laten zweven.
-    if (buf.stil) return 0;
-    const voorbij = nu - buf.t;
-    if (voorbij <= 0) return 0;                  // nog tussen twee peilingen in
-    const snelheid = (buf.d - van) / dt;
-    // Stilstaand of achteruit: niets doen. Dat vangt meteen de bus af die bij
-    // een halte wacht — die had over het vorige stuk geen snelheid.
-    if (snelheid <= 0) return 0;
-    return Math.min(snelheid, VOORUIT_MAX_SNELHEID) * Math.min(voorbij, VOORUIT_MAX);
   }
 
   /**
