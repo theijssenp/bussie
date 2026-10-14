@@ -29,6 +29,13 @@ _db_lock = threading.Lock()
 log = logging.getLogger("traces")
 
 
+# Zo groot mag het WAL-bestand worden voordat SQLite het na een checkpoint
+# weer inkort. Zonder deze grens — en -1, geen grens, is de standaard —
+# blijft het bestand voor altijd staan op de grootste schrijfactie die het
+# ooit gezien heeft.
+WAL_MAX_BYTES = 64 * 1024 * 1024
+
+
 def get_db():
     """Verkrijg database connectie met automatische tabel-aanmaak.
     Slaat ook op als module-level singleton voor HTTP handlers."""
@@ -38,9 +45,42 @@ def get_db():
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA busy_timeout=30000")
+    conn.execute(f"PRAGMA journal_size_limit={WAL_MAX_BYTES}")
     init_db(conn)
+    # Nu meteen, voordat de eerste bezoeker binnen is: een WAL die van een
+    # vorige draai is blijven staan maakt anders elke schrijfronde traag.
+    checkpoint(conn, "bij het starten")
     _trace_db = conn
     return conn
+
+
+def checkpoint(conn, waarom=""):
+    """Schrijf het WAL weg naar de database en kort het bestand in.
+
+    SQLite kopieert het WAL uit zichzelf naar de database, maar inkorten doet
+    het alleen met een expliciete TRUNCATE óf met journal_size_limit gezet.
+    Zonder dat groeide traces.db-wal hier naar 2 GB, terwijl er maar een paar
+    duizend frames (zo'n 11 MB) in gebruik waren: puur verspilde schijfruimte,
+    en bij een onverwachte herstart evenveel te herstellen.
+
+    Lukt het niet omdat er net gelezen wordt, dan is dat geen ramp: dan
+    slagen we de volgende ronde wel.
+    """
+    try:
+        was = os.path.getsize(DB_PATH + "-wal") if os.path.exists(DB_PATH + "-wal") else 0
+        begin = time.time()
+        geblokkeerd, _, _ = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        nu = os.path.getsize(DB_PATH + "-wal") if os.path.exists(DB_PATH + "-wal") else 0
+        if geblokkeerd:
+            log.debug("Checkpoint %s kwam er niet doorheen (WAL %.0f MB)",
+                      waarom, nu / 1048576)
+        elif was > WAL_MAX_BYTES // 4:
+            log.info("Checkpoint %s: WAL van %.0f MB naar %.0f MB in %.1fs",
+                     waarom, was / 1048576, nu / 1048576, time.time() - begin)
+    except Exception as e:
+        # Een mislukte checkpoint mag nooit de poll-lus onderuithalen; de
+        # database zelf blijft hoe dan ook consistent.
+        log.warning("Checkpoint %s mislukt: %s", waarom, e)
 
 
 def db_execute(func, *args, **kwargs):
@@ -132,6 +172,9 @@ def ruim_op(conn, dagen=3):
     if weg > 0 or weg_latest > 0:
         log.info("Opgeruimd: %d posities en %d laatste-posities ouder dan %d dagen",
                  weg, weg_latest, dagen)
+    # Het opruimen zelf gaat ook door het WAL heen — een uur aan posities
+    # weggooien zet er zo honderden megabytes in. Meteen wegschrijven dus.
+    checkpoint(conn, "na het opruimen")
     return weg
 
 
