@@ -44,6 +44,21 @@ const TREIN_MIN_ALPHA = 0.35;
 const SPOOR_CEL = 400;
 const SPOOR_SNAP = 150;
 
+// Treinen animeren langs het spoor, net als bussen langs hun lijn: elke
+// peiling wordt een anker óp het spoor (gekozen op afstand én rijrichting,
+// waarbij hoofdsporen winnen van perronstroken) en de trein glijdt van zijn
+// huidige beeldpositie naar het nieuwe anker. Beide liggen op hetzelfde
+// spoor, dus kan een bocht hem niet honderden meters naast de baan zetten
+// en schiet hij niet heen en weer tussen sporen — een nieuw anker dat maar
+// enkele meters van het oude ligt is GPS-geruis en levert geen beweging op.
+// Zonder spoor in de tegels rekent een trein hooguit dit aantal seconden
+// doodleijk door met koers en snelheid (s)
+const TREIN_DOORREKENEN = 8;
+// Verschuiving onder dit verschil (m) tegenover het vorige anker is ruis
+// van een stilstaand treinstel; hij blijft dan staan in plaats van een
+// paar meter heen en weer te huppelen
+const TREIN_GLIJD = 15;
+
 // Een bus hoort op zijn lijn te staan. Binnen ROUTE_SNAP meter koppelen we
 // hem eraan vast; eenmaal vastgeklikt laten we pas los boven ROUTE_LOS, want
 // anders knippert een bus die rond de grens zweeft tussen weg en route.
@@ -739,22 +754,108 @@ export class IsoRenderer {
   }
 
   /**
-   * Treinposities uit de NS Virtual Train API. Net als bij de schepen: de
-   * backend pollt maar eens per 30s, dus tussendoor rekenen we met koers en
-   * snelheid door (gegist bestek) zodat een trein niet 30 seconden stilstaat.
+   * Treinposities uit de NS Virtual Train API. Net als bij de bussen:
+   * elke peiling wordt een anker óp het spoor — gekozen op afstand én
+   * rijrichting, met hoofdsporen boven perronstroken — en de trein glijdt
+   * van zijn huidige beeldpositie naar dat anker. GPS-geruis (een anker
+   * enkele meters van het vorige) levert geen beweging op, en een bocht
+   * kan hem niet honderden meters naast de baan zetten: beide ankerpunten
+   * liggen op de rails.
    */
-  setTreinen(treinen) {
+  setTreinen(treinen, pollTijd) {
     const center = this.center;
     if (!center) return;
     const R = 6378137, n = Math.PI / 180, cosLat = Math.cos(center.lat * n);
-    const nu = Date.now() / 1000;
+    if (!this._treinBuffer) this._treinBuffer = new Map();
+    // Eén klok voor alles: de backend stempelt zijn poll met
+    // laatste_ophaal en geeft die mee als pollTijd. De latentie tussen
+    // poll en aankomst meten we zelf. Daarmee rekent de frontend
+    // peilingstijdstempels om naar de browserklok, en glijt de trein
+    // soepel door in plaats van te springen.
+    if (pollTijd) {
+      const latentie = (this._treinPollLatentie ||
+        (this._treinPollLatentie = Math.max(0, Date.now() / 1000 - pollTijd)));
+      this._treinKlokVerschil = pollTijd + latentie - Date.now() / 1000;
+    }
+    const nu = Date.now() / 1000 + (this._treinKlokVerschil || 0);
 
-    this.treinen = (treinen || []).map(t => ({
-      ...t,
-      _wx: (t.lon - center.lon) * n * R * cosLat,
-      _wy: -(t.lat - center.lat) * n * R,
-      _gezien: nu,
-    }));
+    this.treinen = (treinen || []).map(t => {
+      const key = String(t.nummer);
+      const oud = this._treinBuffer.get(key);
+      const wx = (t.lon - center.lon) * n * R * cosLat;
+      const wy = -(t.lat - center.lat) * n * R;
+
+      this._zorgSpoorIndex();
+      // De gewenste rijrichting uit de gemelde koers; zonder koers kiest
+      // alleen de afstand het spoor.
+      const koersRad = koersNaarWereld(t.koers);
+      const op = this.spoorPunt(wx, wy, SPOOR_SNAP,
+                                t.koers != null ? koersRad : null);
+      if (!op) {
+        // Geen spoor binnen bereik (buiten de tegels, of buitenland):
+        // rauw punt bewaren; de weergave rekent daar doodleijk mee door.
+        const entry = { ...t, _wx: wx, _wy: wy, anker: null, glijd: null };
+        this._treinBuffer.set(key, entry);
+        return entry;
+      }
+
+      const anker = { x: op.x, y: op.y, t: t.t || nu };
+      // GPS-geruis van een stilstaand treinstel dempen: paar meter heen
+      // en weer op hetzelfde spoor is ruis; hij blijft dan op zijn anker
+      // staan in plaats van te huppelen.
+      if (oud?.anker && !(t.snelheid > 5) &&
+          Math.hypot(anker.x - oud.anker.x, anker.y - oud.anker.y) < TREIN_GLIJD) {
+        anker.x = oud.anker.x;
+        anker.y = oud.anker.y;
+      }
+      // Geen nieuwere peiling dan we al hadden: de NS vult hun feed met
+      // gaten en de backend serveert tussendoor zijn laatste ronde. Het
+      // lopende traject intact laten — anders herkalt de trein bij élke
+      // poll opnieuw vanaf zijn oude plek en schiet hij terug, precies
+      // het schieten wat hier gefixed moest worden.
+      if (oud?.anker && oud.anker.t >= anker.t) {
+        this._treinBuffer.set(key, oud);
+        return oud;
+      }
+
+      // Glij-traject: vanaf de laatst getoonde plek naar het nieuwe
+      // anker, met de gemelde snelheid als tempo — dan rijdt hij op het
+      // scherm even hard als in het echt, en een poll die niets nieuws
+      // brengt blijft ongemerkt. Duurt het langer dan een halve minuut
+      // (stilstaan bij een halte), dan knipt de clamp het af; is de
+      // sprong groter dan een trein ooit in één keer doet (nieuwe rit,
+      // hiaat in de feed), dan zetten we hem meteen over.
+      const van = oud?.beeld ? { x: oud.beeld.x, y: oud.beeld.y }
+                             : { x: anker.x, y: anker.y };
+      const gap = Math.hypot(anker.x - van.x, anker.y - van.y);
+      let duur;
+      if (gap > 2500) {
+        van.x = anker.x;
+        van.y = anker.y;
+        duur = 1;
+      } else {
+        const tempo = Math.max(2, (t.snelheid || 0) / 3.6);   // ≥ 7,2 km/u
+        duur = Math.max(1, Math.min(30, gap / tempo));
+      }
+      const entry = {
+        ...t,
+        _wx: anker.x,
+        _wy: anker.y,
+        anker,
+        glijd: { van, start: nu, duur },
+        _gezien: nu,
+      };
+      this._treinBuffer.set(key, entry);
+      return entry;
+    });
+
+    // Buffers van verdwenen treinen opruimen
+    if (this._treinBuffer.size > this.treinen.length * 2) {
+      const levend = new Set(this.treinen.map(x => String(x.nummer)));
+      for (const k of this._treinBuffer.keys()) {
+        if (!levend.has(k)) this._treinBuffer.delete(k);
+      }
+    }
   }
 
   /**
@@ -781,7 +882,9 @@ export class IsoRenderer {
         for (let i = 0; i + 3 < p.length; i += 2) {
           const x1 = p[i], y1 = p[i + 1], x2 = p[i + 2], y2 = p[i + 3];
           // In elke cel zetten die het segment raakt, anders mist een
-          // lang segment de cel waar de trein toevallig in zit.
+          // lang segment de cel waar de trein toevallig in zit. De vijfde
+          // waarde is de bijspoor-vlag (0 = hoofdspoor, 1 = perron/wissel).
+          const bijspoor = el.waarde ? 1 : 0;
           const cx0 = Math.floor(Math.min(x1, x2) / SPOOR_CEL);
           const cx1 = Math.floor(Math.max(x1, x2) / SPOOR_CEL);
           const cy0 = Math.floor(Math.min(y1, y2) / SPOOR_CEL);
@@ -791,7 +894,7 @@ export class IsoRenderer {
               const sleutel = cx + ',' + cy;
               let lijst = raster.get(sleutel);
               if (!lijst) raster.set(sleutel, lijst = []);
-              lijst.push(x1, y1, x2, y2);
+              lijst.push(x1, y1, x2, y2, bijspoor);
             }
           }
         }
@@ -800,19 +903,25 @@ export class IsoRenderer {
     this._spoorIndex = raster;
   }
 
-  /** Het dichtstbijzijnde punt op een spoor, of null als er geen in de buurt ligt. */
-  spoorPunt(x, y, maxAfstand) {
+  /**
+   * Het dichtstbijzijnde punt op een spoor, of null als er geen in de
+   * buurt ligt. Met een voorkeurshoek (wereld-radians) wegen we sporen
+   * mee in de rijrichting zwaarder dan dwarsliggers, en blijft bij een
+   * gelijke afstand het hoofdspoor winnen van een perronstrook.
+   */
+  spoorPunt(x, y, maxAfstand, voorkeur = null) {
     const raster = this._spoorIndex;
     if (!raster) return null;
     const cx = Math.floor(x / SPOOR_CEL), cy = Math.floor(y / SPOOR_CEL);
-    let besteD = maxAfstand * maxAfstand;
+    const grens = maxAfstand * maxAfstand;
+    let besteS = Infinity;
     let bx = 0, by = 0, bhoek = 0, gevonden = false;
 
     for (let ox = -1; ox <= 1; ox++) {
       for (let oy = -1; oy <= 1; oy++) {
         const lijst = raster.get((cx + ox) + ',' + (cy + oy));
         if (!lijst) continue;
-        for (let i = 0; i < lijst.length; i += 4) {
+        for (let i = 0; i < lijst.length; i += 5) {
           const x1 = lijst[i], y1 = lijst[i + 1];
           const dx = lijst[i + 2] - x1, dy = lijst[i + 3] - y1;
           const len2 = dx * dx + dy * dy;
@@ -821,8 +930,17 @@ export class IsoRenderer {
           t = t < 0 ? 0 : t > 1 ? 1 : t;
           const px = x1 + t * dx, py = y1 + t * dy;
           const d = (x - px) * (x - px) + (y - py) * (y - py);
-          if (d < besteD) {
-            besteD = d;
+          if (d > grens) continue;
+          // Score: afstand, maar een spoor in (tegen) rijrichting weegt
+          // lichter, en een bijspoor bij gelijke nabijheid zwaarder.
+          let score = d;
+          if (voorkeur !== null && voorkeur !== undefined) {
+            const cosD = Math.abs(Math.cos(Math.atan2(dy, dx) - voorkeur));
+            score *= 1.15 - 0.35 * cosD;
+          }
+          if (lijst[i + 4]) score *= 1.3;
+          if (score < besteS) {
+            besteS = score;
             bx = px; by = py;
             bhoek = Math.atan2(dy, dx);
             gevonden = true;
@@ -834,39 +952,62 @@ export class IsoRenderer {
   }
 
   /**
-   * Waar rijdt deze trein nu, doorgerekend vanaf de laatste melding.
-   *
-   * De NS peilt maar eens per halve minuut, dus tussendoor rekenen we met
-   * koers en snelheid door. Dat is een rechte lijn, en een spoor is dat
-   * zelden: door een bocht belandt een trein zo honderden meters naast de
-   * baan. Daarom trekken we de uitkomst naar het dichtstbijzijnde spoor
-   * uit de tegels, en nemen we meteen de richting van dat spoor over.
+   * Waar rijdt deze trein nu? Op het spoor tussen zijn vorige beeldpositie
+   * en het nieuwe anker, met de klok mee van de peilingen zelf: een poll
+   * duurt 5 s en de peiling is al paar seconden oud bij aankomst, dus een
+   * trein die zijn eigen traject versneld aflegt schiet vooruit en glijdt
+   * daarna terug — precies het schieten wat we willen voorkomen. Is het
+   * anker ouder dan de deurrekengrens, dan staat hij stil.
    */
   positieVanTrein(trein) {
-    const verstreken = Math.min(20, Date.now() / 1000 - trein._gezien);
-    let x = trein._wx, y = trein._wy;
-    let hoek = koersNaarWereld(trein.koers);
+    // Zelfde klok als waarop de ankers zijn gestempeld (zie setTreinen).
+    const nu = Date.now() / 1000 + (this._treinKlokVerschil || 0);
+    const anker = trein.anker, glijd = trein.glijd;
 
-    if (trein.snelheid && trein.koers !== null && trein.koers !== undefined) {
-      const afstand = (trein.snelheid / 3.6) * verstreken;   // km/u → m/s
-      const rad = trein.koers * Math.PI / 180;
-      // Koers is een kompaspeiling: 0 = noord, met de klok mee
-      x += Math.sin(rad) * afstand;
-      y -= Math.cos(rad) * afstand;
+    if (anker && glijd) {
+      // Lineair van de oude beeldpositie naar het nieuwe anker, binnen
+      // de trajectduur. Voorbij de duur: stil op het anker — geen
+      // doodleijke uitbreiding die daarna weer terugveert.
+      const t = Math.max(0, Math.min(1, (nu - glijd.start) / glijd.duur));
+      const x = glijd.van.x + (anker.x - glijd.van.x) * t;
+      const y = glijd.van.y + (anker.y - glijd.van.y) * t;
+      const afstand = Math.hypot(anker.x - glijd.van.x, anker.y - glijd.van.y);
+      let hoek;
+      if (afstand >= 1) {
+        // Richting van het pad; die volgt al de rails, want beide
+        // uiteinden liggen op het spoor. Wijkt de gemelde koers haaks of
+        // tegengesteld af (wissel of sprong tussen sporen), dan wint die.
+        hoek = Math.atan2(anker.y - glijd.van.y, anker.x - glijd.van.x);
+        const gemeld = koersNaarWereld(trein.koers);
+        if (gemeld !== null && gemeld !== undefined &&
+            Math.abs(Math.sin(hoek - gemeld)) > 0.87) hoek = gemeld;
+      } else {
+        // Stilstaand: richting van het spoor onder de trein, geen knik
+        // uit rekengeruis.
+        const op = this.spoorPunt(anker.x, anker.y, SPOOR_SNAP,
+                                  trein.koers != null ? koersNaarWereld(trein.koers) : null);
+        hoek = op ? op.hoek : koersNaarWereld(trein.koers);
+      }
+      return { x, y, hoek };
     }
 
-    const op = this.spoorPunt(x, y, SPOOR_SNAP);
-    if (op) {
-      x = op.x;
-      y = op.y;
-      // Een spoorsegment heeft geen rijrichting; kies de kant die het
-      // best bij de gemelde koers past, anders rijdt de helft achteruit.
-      if (hoek !== null && hoek !== undefined) {
-        const verschil = Math.cos(op.hoek - hoek);
-        hoek = verschil >= 0 ? op.hoek : op.hoek + Math.PI;
-      } else {
-        hoek = op.hoek;
-      }
+    if (anker) {
+      // Eerste peiling: staan op het anker, met de richting van het spoor
+      // onder de trein.
+      const op = this.spoorPunt(anker.x, anker.y, SPOOR_SNAP,
+                                trein.koers != null ? koersNaarWereld(trein.koers) : null);
+      return { x: anker.x, y: anker.y, hoek: op ? op.hoek : koersNaarWereld(trein.koers) };
+    }
+
+    // Geen spoor gevonden voor deze melding: doodleijk doorrekenen vanaf
+    // het rauwe punt, hooguit enkele seconden.
+    let x = trein._wx, y = trein._wy;
+    const hoek = koersNaarWereld(trein.koers);
+    if (trein.snelheid && hoek !== null && hoek !== undefined) {
+      const verstreken = Math.min(TREIN_DOORREKENEN, nu - (trein._gezien || nu));
+      const afstand = (trein.snelheid / 3.6) * verstreken;
+      x += Math.sin(trein.koers * Math.PI / 180) * afstand;
+      y -= Math.cos(trein.koers * Math.PI / 180) * afstand;
     }
     return { x, y, hoek };
   }
@@ -890,6 +1031,9 @@ export class IsoRenderer {
 
     for (const trein of this.treinen) {
       const pos = this.positieVanTrein(trein);
+      // De getoonde plek is het startpunt van het volgende tráject: zo
+      // glijdt de trein naar zijn volgende anker in plaats van te springen.
+      trein.beeld = { x: pos.x, y: pos.y, hoek: pos.hoek };
       const p = this.worldToScreen(pos.x, pos.y);
       if (p.x < -60 || p.x > this.vw + 60 || p.y < -60 || p.y > this.vh + 60) {
         trein._sx = undefined;

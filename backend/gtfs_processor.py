@@ -599,10 +599,11 @@ class BussieHandler(BaseHTTPRequestHandler):
                 return
             from urllib.parse import urlparse, parse_qs
             gebied = gevraagd_gebied(parse_qs(urlparse(self.path).query))
-            alle = TREINEN.momentopname()
+            alle, poll_tijd = TREINEN.momentopname()
             self._send_json({
                 "v": 1,
                 "ts": int(time.time()),
+                "poll_tijd": int(poll_tijd),
                 "totaal": len(alle),
                 "treinen": [t for t in alle if binnen_gebied(gebied, t)],
             }, cache="public, max-age=3")

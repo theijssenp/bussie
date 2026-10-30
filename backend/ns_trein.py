@@ -251,7 +251,7 @@ class Treinen:
 
     def momentopname(self):
         with self.slot:
-            return list(self.treinen.values())
+            return list(self.treinen.values()), self.laatste_ophaal
 
     def status(self):
         with self.slot:
@@ -311,7 +311,7 @@ if __name__ == "__main__":
         time.sleep(10)
         s = vaart.status()
         soorten = {}
-        for trein in vaart.momentopname():
+        for trein in vaart.momentopname()[0]:
             soorten[trein["soort"]] = soorten.get(trein["soort"], 0) + 1
         log.info("na %2ds: %s | %s", (ronde + 1) * 10, s,
                  ", ".join(f"{k}={v}" for k, v in sorted(soorten.items(), key=lambda kv: -kv[1])))

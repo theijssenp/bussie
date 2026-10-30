@@ -310,7 +310,7 @@ async function pollTreinen() {
     if (g !== gebied) return;
     treinen = data.treinen || [];
     totalen.treinen = data.totaal ?? treinen.length;
-    renderer.setTreinen(treinen);
+    renderer.setTreinen(treinen, data.poll_tijd || data.ts);
   } catch (err) {
     console.warn('Treinen ophalen mislukt:', err);
   }
