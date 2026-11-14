@@ -82,6 +82,14 @@ const ROUTE_SPRONG = 1500;
 // de heen- en teruggaande poot op dezelfde sporen; de koers kiest dan de
 // goede.
 const RICHTING_STRAF = 80;
+// Twee opeenvolgende peilingen die meer dan zoveel meter terug langs de
+// route liggen: dan rijdt een trein tegen zijn route in en hoort hij op de
+// andere richting van zijn lijn. De gemelde koers alleen is daar te
+// onbetrouwbaar voor: die staat geregeld een poll of drie verkeerd.
+const TREIN_STAP = 30;
+// Past geen van beide richtingen, dan laten we de route zo lang (s) met
+// rust en volgt de trein het spoor onder zijn peiling.
+const TREIN_ROUTE_RUST = 120;
 // Zo ver rekenen we een bus vooruit voorbij zijn laatste peiling. De bron
 // publiceert maar eens per minuut, dus zonder dit staat een bus altijd te
 // zien waar hij een minuut geleden was. Doorrekenen gebeurt lángs de lijn,
@@ -803,10 +811,14 @@ export class IsoRenderer {
       trein._wy = -(t.lat - center.lat) * n * R;
       this._treinBuffer.set(key, trein);
 
-      const route = this._treinRoute(trein);
+      // Een nieuwe peiling, of dezelfde als vorige poll?
+      const nieuw = trein.t !== trein._peilT;
+      trein._peilT = trein.t;
+
+      let route = this._treinRoute(trein, nu);
       if (route) {
-        const volger = trein._volger;
-        const opRoute = !!volger && volger.route === route;
+        let volger = trein._volger;
+        let opRoute = !!volger && volger.route === route;
         // Rijdt hij, dan helpt zijn koers kiezen tussen de heen- en de
         // teruggaande poot waar de route kopmaakt; stilstaand zegt de
         // koers weinig.
@@ -814,10 +826,48 @@ export class IsoRenderer {
           ? koersNaarWereld(trein.koers) : null;
         // Zit hij al op deze route, dan zoeken we in de buurt van zijn
         // vorige plek en mag de peiling verder afwijken voor we loslaten.
-        const d = this.afstandLangs(route, trein._wx, trein._wy,
-                                    opRoute ? volger.peiling.d : null,
-                                    opRoute ? ROUTE_LOS : SPOOR_SNAP, koersW);
-        if (d !== null && this._treinRichtingKlopt(trein, route, d)) {
+        let d = this.afstandLangs(route, trein._wx, trein._wy,
+                                  opRoute ? volger.peiling.d : null,
+                                  opRoute ? ROUTE_LOS : SPOOR_SNAP, koersW);
+
+        // Rijdt hij wel de kant op die de route zegt? Het bewijs is de
+        // verplaatsing van peiling tot peiling lángs de route: vooruit telt
+        // op, achteruit telt af. Bij zijn eerste peiling op een route is
+        // de gemelde koers de beste gok.
+        const rijdt = trein.snelheid > 5;
+        if (d !== null && nieuw && rijdt && opRoute &&
+            trein._vorigeRoute === route && trein._vorigeD != null) {
+          const stap = d - trein._vorigeD;
+          if (stap < -TREIN_STAP) trein._bewijs = Math.max(-3, (trein._bewijs || 0) - 1);
+          else if (stap > TREIN_STAP) trein._bewijs = Math.min(3, (trein._bewijs || 0) + 1);
+        }
+        if (d !== null && !opRoute && koersW !== null && trein.snelheid > 20 &&
+            Math.cos(this.puntOpRoute(route, d).hoek - koersW) <= -0.5) {
+          trein._bewijs = -2;
+        }
+        if (d !== null && (trein._bewijs || 0) <= -2) {
+          // Tegen de route in: de andere richting van zijn lijn, als die er
+          // is en hij erop ligt. Anders even geen route.
+          trein._bewijs = 0;
+          const ander = this._andereRichting(trein, route);
+          const dA = ander ? this.afstandLangs(ander, trein._wx, trein._wy, null, SPOOR_SNAP, koersW) : null;
+          if (dA !== null) {
+            trein._andersom = !trein._andersom;
+            route = ander;
+            d = dA;
+            volger = null;
+            opRoute = false;
+          } else {
+            trein._geenRouteTot = nu + TREIN_ROUTE_RUST;
+            d = null;
+          }
+        }
+
+        if (d !== null) {
+          if (nieuw || trein._vorigeRoute !== route) {
+            trein._vorigeD = d;
+            trein._vorigeRoute = route;
+          }
           const v = (t.snelheid || 0) / 3.6;
           const tPeil = t.t || nu;
           // De onzekerheidsstraal telt alleen voor echte GPS-peilingen
@@ -827,18 +877,18 @@ export class IsoRenderer {
           if (opRoute) {
             volger.peil(d, tPeil, v, nauw);
           } else {
-            const nieuw = new TreinVolger(d, tPeil, v, this._halteAfstanden(route), nauw);
-            nieuw.route = route;
+            const nieuweVolger = new TreinVolger(d, tPeil, v, this._halteAfstanden(route), nauw);
+            nieuweVolger.route = route;
             // Stond hij al ergens op het scherm (zonder route, of op een
             // andere vorm)? Dan vandaar verder glijden in plaats van
             // springen, mits dat niet te ver van de peiling is.
             if (trein.beeld) {
               const dBeeld = this.afstandLangs(route, trein.beeld.x, trein.beeld.y, d, SPOOR_SNAP, koersW);
               if (dBeeld !== null && Math.abs(dBeeld - d) < TREIN_SPRONG) {
-                nieuw.beeld = { d: dBeeld, t: nu };
+                nieuweVolger.beeld = { d: dBeeld, t: nu };
               }
             }
-            trein._volger = nieuw;
+            trein._volger = nieuweVolger;
           }
           trein.anker = null;
           trein.glijd = null;
@@ -848,7 +898,9 @@ export class IsoRenderer {
 
       // Geen route (of te ver ervan af): het spoor onder de peiling
       trein._volger = null;
-      this._treinOpSpoor(trein, nu);
+      trein._vorigeRoute = null;
+      trein._vorigeD = null;
+      this._treinOpSpoor(trein, nu, nieuw);
       return trein;
     });
 
@@ -863,15 +915,27 @@ export class IsoRenderer {
 
   /** De routevorm van deze trein: die van zijn eigen rit, anders de
    *  hoofdvorm van zijn lijn en richting. Zonder lijnenbundel: niets.
-   *  Bleek hij tegen zijn route in te rijden, dan de andere richting. */
-  _treinRoute(trein) {
+   *  Bleek hij tegen zijn route in te rijden, dan de andere richting; en
+   *  paste die ook niet, dan even geen route. */
+  _treinRoute(trein, nu) {
     if (!trein.sid && !trein.rid) return null;
+    if (trein._geenRouteTot && nu < trein._geenRouteTot) return null;
     const route = this.routeVoor(trein);
-    if (route && trein._andersom && trein.rid) {
-      const ander = this.lijnIndex.get(`${trein.rid}|${1 - (trein.richting || 0)}`);
+    if (route && trein._andersom) {
+      const ander = this._andereRichting(trein, route);
       if (ander) return ander;
     }
     return route;
+  }
+
+  /** De hoofdvorm van de andere richting van zijn lijn — of, zit hij daar
+   *  al op, de vorm van zijn eigen rit terug. */
+  _andereRichting(trein, route) {
+    const primair = this.routeVoor(trein);
+    const ander = trein.rid
+      ? this.lijnIndex.get(`${trein.rid}|${1 - (trein.richting || 0)}`) : null;
+    const kandidaat = route === primair ? ander : primair;
+    return kandidaat && kandidaat !== route ? kandidaat : null;
   }
 
   /** Haltes van een route als oplopende afstanden; één keer berekend. */
@@ -883,46 +947,13 @@ export class IsoRenderer {
   }
 
   /**
-   * Rijdt de trein wel de kant op die de route zegt? Een rijdende trein
-   * met een koers die haaks of tegengesteld staat op de route zit op de
-   * verkeerde vorm (of de verkeerde richting ervan). Eén afwijkende
-   * meting is ruis — bij een wissel, of waar de route op zichzelf
-   * terugkeert — pas na drie op rij laten we de route los.
-   */
-  _treinRichtingKlopt(trein, route, d) {
-    if (trein.koers == null || !(trein.snelheid > 20)) return true;
-    const koersW = koersNaarWereld(trein.koers);
-    const p = this.puntOpRoute(route, d);
-    if (Math.cos(p.hoek - koersW) > -0.5) {
-      trein._tegen = 0;
-      return true;
-    }
-    trein._tegen = (trein._tegen || 0) + 1;
-    if (trein._tegen < 3) return true;
-    // Drie keer op rij tegen de route in. Past de andere richting van zijn
-    // lijn wél bij zijn koers, dan die; anders blijft hij van de route af
-    // tot zijn koers weer klopt.
-    trein._tegen = 0;
-    const primair = this.routeVoor(trein);
-    const ander = trein.rid ? this.lijnIndex.get(`${trein.rid}|${1 - (trein.richting || 0)}`) : null;
-    const kandidaat = route === primair ? ander : primair;
-    if (kandidaat && kandidaat !== route) {
-      const dK = this.afstandLangs(kandidaat, trein._wx, trein._wy, null, SPOOR_SNAP, koersW);
-      if (dK !== null && Math.cos(this.puntOpRoute(kandidaat, dK).hoek - koersW) > 0.5) {
-        trein._andersom = !trein._andersom;
-      }
-    }
-    return false;
-  }
-
-  /**
    * Een trein zonder bekende route: elke peiling wordt een anker óp het
    * spoor — gekozen op afstand én rijrichting, met hoofdsporen boven
    * perronstroken — en de trein glijdt van zijn huidige beeldpositie naar
    * dat anker. GPS-geruis (een anker enkele meters van het vorige) levert
    * geen beweging op.
    */
-  _treinOpSpoor(trein, nu) {
+  _treinOpSpoor(trein, nu, nieuw) {
     const wx = trein._wx, wy = trein._wy;
     const koersRad = koersNaarWereld(trein.koers);
     const op = this.spoorPunt(wx, wy, SPOOR_SNAP,
@@ -930,10 +961,7 @@ export class IsoRenderer {
     if (!op) {
       // Geen spoor binnen bereik (buiten de tegels, of buitenland):
       // rauw punt houden; de weergave rekent daar doodleijk mee door.
-      if (trein._peilT !== trein.t) {
-        trein._peilT = trein.t;
-        trein._gezien = nu;
-      }
+      if (nieuw) trein._gezien = nu;
       trein.anker = null;
       trein.glijd = null;
       return;
