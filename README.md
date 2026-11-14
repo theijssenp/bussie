@@ -13,6 +13,9 @@ gtfs.ovapi.nl/nl/vehiclePositions.pb    ← Nederlandse open data (GTFS-RT proto
     - Filtert op QBUZZ + bbox Groningen
     - Serveert /api/voertuigen?stad=groningen
     - Serveert statische kaartdata + frontend
+    - Koppelt NS-treinnummers (ns_trein.py, elke 5s bij de NS gepolld)
+      aan hun rit in de GTFS, zodat /api/treinen per trein de route,
+      richting en vorm meegeeft
                                          ↓
   backend/kaart_generator.py             ← Eenmalige kaartdata generator
     - OSM data via Overpass API → isometrische JSON
@@ -33,6 +36,10 @@ gtfs.ovapi.nl/nl/vehiclePositions.pb    ← Nederlandse open data (GTFS-RT proto
     - Bussen zitten vastgeklikt op hun lijn, glijden eroverheen tussen twee
       peilingen en worden daarna nog een halve minuut doorgerekend — de bron
       publiceert maar eens per minuut
+    - Treinen rijden langs de route van hun eigen rit (treinvolger.js):
+      met hun gemelde snelheid, waarbij de grillige NS-peilingen alleen
+      bijsturen. Een trein zonder bekende route valt terug op het spoor
+      onder zijn peiling
     - Pan/zoom/touch interaction
                                          ↓
   frontend/js/app.js                    ← App logic

@@ -47,6 +47,10 @@ QUOTA_RESERVE = 120
 # naarmate de melding ouder wordt, zodat zichtbaar blijft wat oude data is.
 VERVALTIJD = 10 * 60
 
+# Zoveel recente plekken per trein onthouden we om een oude peiling die de
+# feed nog eens langsbrengt te herkennen (zie _ophalen)
+HISTORIE = 6
+
 # De stationslijst verandert hooguit een paar keer per jaar
 STATIONS_VERVAL = 24 * 3600
 # Een rit blijft een tijdje geldig; zo blijft het bij één navraag per trein
@@ -226,20 +230,54 @@ class Treinen:
                 if koers is not None and koers >= 360:  # niet beschikbaar
                     koers = None
                 snelheid = t.get("snelheid")
+                lat, lon = round(lat, 5), round(lng, 5)
+
+                # De feed zet geen tijdstip bij een positie, en hij is
+                # grillig: een derde van de treinen staat een ronde later
+                # nog op precies dezelfde plek, en geregeld komt een oudere
+                # peiling nog eens langs — soms twee rondes achter elkaar,
+                # zodat de trein terug- en weer vooruitspringt. Een positie
+                # die we al eens zagen is dezelfde peiling als toen, dus 't'
+                # is het moment waarop we deze plek voor het eerst zagen;
+                # 'gezien' is wanneer de trein voor het laatst in de feed
+                # zat. Zo kan de kaart de trein doorrekenen vanaf zijn echte
+                # peiling in plaats van hem stil te zetten of terug te
+                # zetten. Daarvoor onthouden we per trein de laatste paar
+                # plekken.
+                oud = self.treinen.get(nummer)
+                historie = oud["_historie"] if oud else []
+                peiling = None
+                for h_lat, h_lon, h_t in historie:
+                    if h_lat == lat and h_lon == lon:
+                        peiling = h_t
+                        break
+                if peiling is None:
+                    peiling = int(nu)
+                    historie = ([(lat, lon, peiling)] + historie)[:HISTORIE]
+
+                # De straal (m) waarbinnen de NS de trein weet. Bij een verse
+                # GPS-peiling een paar honderd meter; staat de positie stil
+                # terwijl de trein rijdt, dan groeit hij elke ronde mee —
+                # en zegt dus precies hoe weinig deze plek nog waard is.
+                nauw = t.get("horizontaleNauwkeurigheid")
 
                 self.treinen[nummer] = {
                     "nummer": nummer,
                     "rit": t.get("ritId"),
                     "soort": TYPE_NAMEN.get(t.get("type"), (t.get("type") or "trein").lower()),
-                    "lat": round(lat, 5),
-                    "lon": round(lng, 5),
+                    "lat": lat,
+                    "lon": lon,
                     "koers": round(koers, 1) if koers is not None else None,
                     "snelheid": round(snelheid, 1) if snelheid is not None else None,
-                    "t": int(nu),
+                    "nauw": int(round(nauw)) if nauw is not None else None,
+                    "bron": t.get("bron") or "",
+                    "t": peiling,
+                    "gezien": int(nu),
+                    "_historie": historie,
                 }
 
             grens = nu - VERVALTIJD
-            weg = [n for n, tr in self.treinen.items() if tr["t"] < grens]
+            weg = [n for n, tr in self.treinen.items() if tr["gezien"] < grens]
             for n in weg:
                 del self.treinen[n]
 
@@ -251,7 +289,9 @@ class Treinen:
 
     def momentopname(self):
         with self.slot:
-            return list(self.treinen.values()), self.laatste_ophaal
+            return ([{k: v for k, v in tr.items() if k != "_historie"}
+                     for tr in self.treinen.values()],
+                    self.laatste_ophaal)
 
     def status(self):
         with self.slot:

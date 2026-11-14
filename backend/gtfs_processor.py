@@ -63,6 +63,13 @@ STANDAARD_GEBIED = "nederland"
 ROUTE_CACHE = {}  # route_id → {short_name, long_name, route_type}
 STOP_CACHE = {}   # stop_id → {name, lat, lon}
 TRIP_CACHE = {}    # trip_id → {route_id, trip_headsign, direction_id}
+# Treinritten uit dezelfde GTFS: de NS-feed geeft alleen een treinnummer, en
+# dat nummer staat in trips.txt als trip_short_name. Zo krijgt een trein, net
+# als een bus, de vorm van zijn eigen rit mee en kan de kaart hem daarlangs
+# laten glijden. Welke rit bij een nummer hoort hangt af van de dag.
+TREIN_RITTEN = {}  # treinnummer → [(service_id, route_id, direction_id, shape_id, headsign)]
+DIENST_DAGEN = {}  # 'JJJJMMDD' → set(service_id) die die dag rijden
+TREIN_ROUTE_TYPE = "2"
 
 # Laatst opgehaalde realtime data per stad
 REALTIME_CACHE = {}  # city → {v, ts, vehicles: [...]}
@@ -157,15 +164,88 @@ def load_static_gtfs():
                 for row in reader:
                     trip_id = row.get("trip_id", "")
                     shape_id = row.get("shape_id", "")
+                    route_id = row.get("route_id", "")
                     TRIP_CACHE[trip_id] = {
-                        "route_id": row.get("route_id", ""),
+                        "route_id": route_id,
                         "trip_headsign": row.get("trip_headsign", ""),
                         "direction_id": row.get("direction_id", ""),
                         "shape_id": shape_ids.setdefault(shape_id, shape_id),
                     }
-            log.info("  %d trips geladen", len(TRIP_CACHE))
+                    # Treinen: op nummer te vinden, want dat is alles wat
+                    # de NS-positiefeed van een trein vertelt.
+                    nummer = (row.get("trip_short_name") or "").strip()
+                    if nummer and ROUTE_CACHE.get(route_id, {}).get("route_type") == TREIN_ROUTE_TYPE:
+                        TREIN_RITTEN.setdefault(nummer, []).append((
+                            row.get("service_id", ""),
+                            route_id,
+                            row.get("direction_id", ""),
+                            shape_ids.setdefault(shape_id, shape_id),
+                            row.get("trip_headsign", ""),
+                        ))
+            log.info("  %d trips geladen, %d treinnummers", len(TRIP_CACHE), len(TREIN_RITTEN))
+
+        # Welke diensten rijden op welke dag; zonder dit zou een treinnummer
+        # op de rit van een andere dag (en soms een andere route) uitkomen.
+        if "calendar_dates.txt" in zf.namelist():
+            with zf.open("calendar_dates.txt") as f:
+                reader = csv.DictReader(io.TextIOWrapper(f, encoding="utf-8"))
+                for row in reader:
+                    if row.get("exception_type", "") == "1":
+                        DIENST_DAGEN.setdefault(row.get("date", ""), set()).add(row.get("service_id", ""))
+            log.info("  %d dienstdagen geladen", len(DIENST_DAGEN))
 
     log.info("Statische GTFS klaar")
+
+
+_trein_rit_cache = {}  # (treinnummer, dag) → rit of None
+_trein_rit_lock = threading.Lock()
+
+
+def trein_rit(nummer, nu=None):
+    """De rit van een treinnummer vandaag: (route_id, richting, shape_id,
+    bestemming), of None als de GTFS hem niet kent.
+
+    Een nummer rijdt doorgaans maar één rit per dag, maar niet elke dag
+    dezelfde: in het weekend kan hetzelfde nummer een andere route hebben.
+    Een nachttrein na middernacht hoort nog bij de dienst van gisteren.
+    """
+    nummer = str(nummer)
+    ritten = TREIN_RITTEN.get(nummer)
+    if not ritten:
+        return None
+    nu = nu or time.time()
+    dag = time.strftime("%Y%m%d", time.localtime(nu))
+    sleutel = (nummer, dag)
+    with _trein_rit_lock:
+        if sleutel in _trein_rit_cache:
+            return _trein_rit_cache[sleutel]
+
+    gekozen = None
+    for d in (dag, time.strftime("%Y%m%d", time.localtime(nu - 86400))):
+        actief = DIENST_DAGEN.get(d)
+        if not actief:
+            continue
+        kandidaten = [r for r in ritten if r[0] in actief]
+        if kandidaten:
+            gekozen = kandidaten[0]
+            break
+    if gekozen is None and len(ritten) == 1:
+        gekozen = ritten[0]
+
+    uit = None
+    if gekozen:
+        _, route_id, richting, shape_id, bestemming = gekozen
+        uit = {
+            "rid": route_id,
+            "richting": int(richting) if richting.isdigit() else 0,
+            "sid": shape_id,
+            "bestemming": bestemming,
+        }
+    with _trein_rit_lock:
+        if len(_trein_rit_cache) > 20000:
+            _trein_rit_cache.clear()
+        _trein_rit_cache[sleutel] = uit
+    return uit
 
 
 def build_gtfs_ids(city):
@@ -600,12 +680,21 @@ class BussieHandler(BaseHTTPRequestHandler):
             from urllib.parse import urlparse, parse_qs
             gebied = gevraagd_gebied(parse_qs(urlparse(self.path).query))
             alle, poll_tijd = TREINEN.momentopname()
+            # Elke trein krijgt de rit uit de dienstregeling mee (route,
+            # richting en vorm), zodat de kaart hem over zijn eigen route
+            # kan laten glijden in plaats van over het dichtstbijzijnde spoor.
+            uit = []
+            for t in alle:
+                if not binnen_gebied(gebied, t):
+                    continue
+                rit = trein_rit(t["nummer"])
+                uit.append({**t, **rit} if rit else t)
             self._send_json({
                 "v": 1,
                 "ts": int(time.time()),
                 "poll_tijd": int(poll_tijd),
                 "totaal": len(alle),
-                "treinen": [t for t in alle if binnen_gebied(gebied, t)],
+                "treinen": uit,
             }, cache="public, max-age=3")
             return
 

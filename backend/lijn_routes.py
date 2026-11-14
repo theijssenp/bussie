@@ -51,6 +51,10 @@ SIMPLIFY_EPS = 4.0
 # lijn en richting rijdt; een bus krijgt via zijn shape_id de vorm van zijn
 # eigen rit. Lager zetten vindt meer omleidingen, maar maakt de bundel zwaarder.
 VARIANT_DREMPEL = 0.25
+# Voor treinen bewaren we élke variant: er zijn er landelijk maar een paar
+# honderd, dus dat kost een paar honderd kilobyte, en een trein die zijn vorm
+# mist kan niet over zijn route glijden.
+TREIN_ROUTE_TYPE = "2"
 
 
 def latlon_to_meters(lat, lon):
@@ -112,6 +116,7 @@ def lees_routes(zf):
                 "lijn": row.get("route_short_name", "").strip(),
                 "naam": row.get("route_long_name", "").strip(),
                 "kleur": f"#{kleur}" if len(kleur) == 6 else DEFAULT_KLEUR,
+                "type": row.get("route_type", "").strip(),
             }
     log.info("  %d routes van %s", len(routes), "/".join(sorted(AGENCIES)) if AGENCIES else "alle vervoerders")
     return routes
@@ -425,9 +430,10 @@ def genereer():
             r = routes[route_id]
             totaal = sum(per_shape.values())
             hoofd = max(per_shape, key=lambda sid: (per_shape[sid], sid))
+            drempel = 0.0 if r.get("type") == TREIN_ROUTE_TYPE else VARIANT_DREMPEL
             for shape_id, aantal in sorted(per_shape.items(),
                                            key=lambda kv: (-kv[1], kv[0])):
-                if shape_id != hoofd and aantal < totaal * VARIANT_DREMPEL:
+                if shape_id != hoofd and aantal < totaal * drempel:
                     continue
                 kandidaten.append({
                     "lijn": r["lijn"],

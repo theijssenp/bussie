@@ -6,7 +6,7 @@
 // De versie-query hier moet gelijk lopen met index.html's <script>-tags:
 // Cloudflare cachet /js/*.js hardnekkig op URL, en zonder query blijft deze
 // import — anders dan de <script>-tag zelf — op een oude cache hangen.
-import { IsoRenderer } from './kaart.js?v=42';
+import { IsoRenderer } from './kaart.js?v=43';
 import { TegelBron } from './tegels.js?v=33';
 import { decodeerLijnen } from './lijnen.js?v=42';
 
@@ -1057,7 +1057,11 @@ function toonTrein(trein) {
     ? '—'
     : `${kompas(trein.koers)} · ${Math.round(trein.koers)}°`;
   const ouderdom = Math.max(0, Math.round(Date.now() / 1000 - trein.t));
-  const gemeld = ouderdom < 60 ? `${ouderdom} s geleden` : `${Math.round(ouderdom / 60)} min geleden`;
+  let gemeld = ouderdom < 60 ? `${ouderdom} s geleden` : `${Math.round(ouderdom / 60)} min geleden`;
+  // De NS geeft een straal waarbinnen de trein zit; groeit die tot
+  // kilometers, dan is de positie bevroren en rijdt de kaart door op de
+  // laatste bruikbare peiling. Dat mag je zien.
+  if (trein.bron !== 'KV6' && trein.nauw > 1500) gemeld += ' · positie onzeker';
 
   const rit = ritten.get(trein.nummer);
   const soortNaam = (rit && rit.soort) || TREIN_NAMEN[trein.soort] || TREIN_NAMEN.trein;
