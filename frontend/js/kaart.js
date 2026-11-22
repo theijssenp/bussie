@@ -3614,13 +3614,13 @@ function zonderEigenKleur(kleur) {
 
 /**
  * Plek in de bundel (in stroken) naar een afstand in stroken. De binnenste
- * drie stroken aan elke kant krijgen hun volle breedte; daarbuiten — bij een
- * busstation waar dertig lijnen samenkomen — schuiven ze half over elkaar,
+ * vier stroken aan elke kant krijgen hun volle breedte; daarbuiten — bij een
+ * busstation waar veel kleuren samenkomen — schuiven ze half over elkaar,
  * zodat de bundel geen halve wijk breed wordt.
  */
 function strookAfstand(o) {
   const a = Math.abs(o);
-  const v = a <= 3 ? a : 3 + (a - 3) * 0.45;
+  const v = a <= 4 ? a : 4 + (a - 4) * 0.5;
   return o < 0 ? -v : v;
 }
 

@@ -24,8 +24,13 @@ Werkwijze, alles in numpy:
    bundel in- of uitgaat er geleidelijk naartoe schuift in plaats van te
    springen.
 
-Een "lijn" is hier lijnnummer plus kleur: heen, terug en varianten van één
-lijn delen dus één strook.
+Een strook hoort bij een kleur, niet bij een lijnnummer. Twee lijnen met
+dezelfde kleur zien er naast elkaar uit als één brede streep; die
+krijgen dus één strook. Hetzelfde geldt voor alle lijnen zonder eigen
+kleur (of met bijna zwart), die de kaart allemaal in hetzelfde grijs
+tekent. Bij een busstation waar veertig lijnen stoppen scheelt dat een
+bundel van veertig stroken: in Groningen worden het er dertien, in
+Eindhoven — waar alles grijs is — één.
 """
 
 import math
@@ -35,13 +40,41 @@ import numpy as np
 STAP = 12.5        # m tussen twee monsters
 CEL = 25.0         # m, rastervak
 SECTOREN = 6       # richtingsvakken over een halve slag (30° elk)
-UITSMEER = 6       # monsters aan weerszijden voor het uitsmeren (~75 m)
+UITSMEER = 12      # monsters aan weerszijden voor het uitsmeren (~150 m)
+STANDAARDKLEUR = "#8aa0b2"   # zelfde als LIJN_STANDAARDKLEUR in kaart.js
 EENHEID = 4        # verschuiving opgeslagen in kwarten van een strook
 
 
-def _nummer_sleutel(lijn):
-    cijfers = "".join(c for c in lijn if c.isdigit())
-    return (int(cijfers) if cijfers else 9999, lijn)
+def strook_sleutel(kleur):
+    """
+    Welke strook een lijn krijgt: zijn kleur, of "grijs" als de kaart hem
+    grijs tekent. Moet gelijk lopen met zonderEigenKleur() in kaart.js.
+    """
+    if not kleur or kleur.lower() == STANDAARDKLEUR:
+        return "grijs"
+    h = kleur.lstrip("#")
+    r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
+    if r * 0.299 + g * 0.587 + b * 0.114 < 40:
+        return "grijs"
+    return kleur.lower()
+
+
+def _tint(sleutel):
+    """Volgorde in de bundel: grijs aan de rand, de rest op kleurtint."""
+    if sleutel == "grijs":
+        return (-1.0, 0.0)
+    h = sleutel.lstrip("#")
+    r, g, b = (int(h[i:i + 2], 16) / 255 for i in (0, 2, 4))
+    mx, mn = max(r, g, b), min(r, g, b)
+    if mx == mn:
+        return (0.0, mx)
+    if mx == r:
+        tint = ((g - b) / (mx - mn)) % 6
+    elif mx == g:
+        tint = (b - r) / (mx - mn) + 2
+    else:
+        tint = (r - g) / (mx - mn) + 4
+    return (tint, mx)
 
 
 def bereken(lijnen):
@@ -52,8 +85,7 @@ def bereken(lijnen):
     if not lijnen:
         return []
 
-    sleutels = sorted({(r["lijn"], r["kleur"]) for r in lijnen},
-                      key=lambda s: (s[1], _nummer_sleutel(s[0])))
+    sleutels = sorted({strook_sleutel(r["kleur"]) for r in lijnen}, key=_tint)
     sleutel_id = {s: i for i, s in enumerate(sleutels)}
     K = len(sleutels)
 
@@ -69,7 +101,7 @@ def bereken(lijnen):
             # één los punt: als monster zonder richting
             xs.append(p[:, 0]); ys.append(p[:, 1])
             dxs.append(np.ones(len(p))); dys.append(np.zeros(len(p)))
-            routes.append(np.full(len(p), ri)); sleutel_per.append(sleutel_id[(r["lijn"], r["kleur"])])
+            routes.append(np.full(len(p), ri)); sleutel_per.append(sleutel_id[strook_sleutel(r["kleur"])])
             teller += len(p)
             continue
         d = np.diff(p, axis=0)
@@ -96,7 +128,7 @@ def bereken(lijnen):
 
         xs.append(mx); ys.append(my); dxs.append(mdx); dys.append(mdy)
         routes.append(np.full(len(mx), ri))
-        sleutel_per.append(sleutel_id[(r["lijn"], r["kleur"])])
+        sleutel_per.append(sleutel_id[strook_sleutel(r["kleur"])])
         punt_index.append(np.append(begin, len(stuk)) + teller)
         teller += len(mx)
 
