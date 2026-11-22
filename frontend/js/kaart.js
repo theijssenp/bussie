@@ -116,17 +116,48 @@ const ZOOM_STAP_MAX = 120;
 // de standaard okerkleur, want een grijs busje leest niet als een bus.
 const LIJN_STANDAARDKLEUR = '#8aa0b2';
 
-// Kleur per scheepssoort. Veerboten springen eruit — dat is wat je wilt zien
-const SCHIP_KLEUREN = {
-  passagier: '#2f8fd0',
-  sneldienst: '#2f8fd0',
-  vracht: '#7d8a99',
-  tanker: '#9a6b5a',
-  sleepboot: '#e08a3c',
-  visser: '#5aa06e',
-  zeilboot: '#8fb0c4',
-  plezier: '#8fb0c4',
-  overig: '#93a3b0',
+// Kleur per scheepssoort: voor de stip ver uitgezoomd en in de popup.
+// Elke soort een eigen, verzadigde tint, zodat je ook als stip ziet wat
+// er vaart. Veerboten springen eruit — dat is wat je wilt zien.
+export const SCHIP_KLEUREN = {
+  passagier: '#1f7ae0',
+  sneldienst: '#12b5c8',
+  vracht: '#4f5fd0',
+  tanker: '#c0442f',
+  sleepboot: '#f07a1a',
+  visser: '#2f9e5b',
+  zeilboot: '#d9489a',
+  plezier: '#e8b020',
+  overig: '#8a99a8',
+};
+
+// Kleurkeuzes per scheepssoort. Welke combinatie een schip krijgt hangt
+// vast aan zijn MMSI, dus hetzelfde schip houdt altijd dezelfde kleuren
+// terwijl een vloot van tien vrachtschepen toch tien verschillende wordt.
+const SCHIP_ROMPEN = {
+  passagier: ['#ffffff'],
+  sneldienst: ['#ffffff', '#f4f6f8'],
+  vracht: ['#1f3a68', '#2b2f36', '#7a1f24', '#1d5e4a', '#0f4c81', '#5b2a6e'],
+  tanker: ['#9b2d22', '#3a3f47', '#2b4a6b', '#7a2e3a', '#4a5a2a'],
+  sleepboot: ['#e8641a', '#d32f2f', '#1e5aa8', '#f2b705', '#1f7a4a'],
+  visser: ['#2e7d4f', '#1f5fa8', '#b3362c', '#2d3e50', '#e0a020'],
+  zeilboot: ['#ffffff', '#ffffff', '#1d3557', '#f1ece0'],
+  plezier: ['#ffffff', '#ffffff', '#f1ece0', '#1d3557'],
+  overig: ['#6f8394', '#55708a', '#8a7a64'],
+};
+const SCHIP_ACCENTEN = ['#1f7ae0', '#d6322f', '#0a9a8a', '#f2a81d', '#7b4fd0', '#e0457b', '#2f9e5b'];
+const CONTAINERKLEUREN = ['#d6322f', '#1f7ae0', '#f2a81d', '#2f9e5b', '#e8641a',
+                          '#8a96a3', '#7b4fd0', '#0a9a8a', '#c9c2b4', '#a8322a'];
+const ZEILKLEUREN = ['#ffffff', '#e94b3c', '#f2c12e', '#2f8fd0', '#7b4fd0', '#ff8a3d', '#1fae8c'];
+// Lengte (px bij schaal 1) als AIS geen afmetingen meldt, en breedte als
+// fractie van de lengte — een sleepboot is gedrongen, een sneldienst slank.
+const SCHIP_STANDAARDLENGTE = {
+  passagier: 28, sneldienst: 24, vracht: 30, tanker: 30, sleepboot: 18,
+  visser: 20, zeilboot: 18, plezier: 16, overig: 20,
+};
+const SCHIP_BREEDTE = {
+  passagier: 0.34, sneldienst: 0.3, vracht: 0.3, tanker: 0.3, sleepboot: 0.46,
+  visser: 0.38, zeilboot: 0.34, plezier: 0.4, overig: 0.36,
 };
 const KNOOP = 0.5144;   // knoop → meter per seconde
 
@@ -699,7 +730,7 @@ export class IsoRenderer {
   tekenSchepen(ctx) {
     if (!this.schepen?.length) return;
     const z = this.cam.zoom;
-    const schaal = Math.max(0.7, Math.min(2.2, 0.5 + z * 0.7));
+    const schaal = Math.max(0.8, Math.min(2.4, 0.6 + z * 0.75));
 
     const stippen = z < STIP_ZOOM;
     const perKleur = new Map();
@@ -707,7 +738,7 @@ export class IsoRenderer {
     for (const schip of this.schepen) {
       const pos = this.positieVanSchip(schip);
       const p = this.worldToScreen(pos.x, pos.y);
-      if (p.x < -40 || p.x > this.vw + 40 || p.y < -40 || p.y > this.vh + 40) {
+      if (p.x < -60 || p.x > this.vw + 60 || p.y < -60 || p.y > this.vh + 60) {
         schip._sx = undefined;
         continue;
       }
@@ -721,13 +752,13 @@ export class IsoRenderer {
         else perKleur.set(kleur, [p]);
         continue;
       }
-      this.tekenSchip(ctx, p.x, p.y, schaal, this.schermHoek(koersNaarWereld(schip.koers)),
-                      kleur, schip.lengte);
+      const l = this.tekenSchip(ctx, p.x, p.y, schaal,
+                                this.schermHoek(koersNaarWereld(schip.koers)), schip);
       if (this.hoveredSchip === schip) {
         ctx.strokeStyle = this.colors.text;
         ctx.lineWidth = 2;
         ctx.beginPath();
-        ctx.arc(p.x, p.y, 15 * schaal, 0, TAU);
+        ctx.arc(p.x, p.y, l * 0.62, 0, TAU);
         ctx.stroke();
       }
     }
@@ -743,36 +774,396 @@ export class IsoRenderer {
     }
   }
 
-  /** Een romp met een punt aan de voorkant, gedraaid in de vaarrichting. */
-  tekenSchip(ctx, x, y, schaal, hoek, kleur, lengte) {
-    // Grote schepen mogen wat groter, maar het verschil blijft bescheiden
-    const l = (lengte && lengte > 120 ? 26 : lengte && lengte > 40 ? 20 : 15) * schaal;
-    const b = l * 0.34;
+  /**
+   * De vaste kleuren van één schip. Romp, accent, containers en zeil komen
+   * uit een lijstje per soort; de MMSI bepaalt welke, zodat een schip zijn
+   * kleuren houdt van peiling tot peiling.
+   */
+  schipStijl(schip) {
+    if (schip._stijl && schip._stijl.bron === schip.soort) return schip._stijl;
+    const soort = SCHIP_ROMPEN[schip.soort] ? schip.soort : 'overig';
+    const seed = (Number(schip.mmsi) || Math.round(Math.abs(schip._wx || 0) * 7)) % 2000000000;
+    const kies = (lijst, zout) =>
+      lijst[Math.floor(hashPositie(seed, zout * 7919) * lijst.length) % lijst.length];
+
+    const romp = kies(SCHIP_ROMPEN[soort], 1);
+    const rompRgb = hexNaarRgb(romp);
+    const helder = rompRgb[0] * 0.299 + rompRgb[1] * 0.587 + rompRgb[2] * 0.114;
+    const accent = kies(SCHIP_ACCENTEN, 2);
+    let accent2 = kies(SCHIP_ACCENTEN, 3);
+    if (accent2 === accent) accent2 = SCHIP_ACCENTEN[(SCHIP_ACCENTEN.indexOf(accent) + 3) % SCHIP_ACCENTEN.length];
+
+    const containers = [];
+    for (let i = 0; i < 24; i++) containers.push(kies(CONTAINERKLEUREN, 10 + i));
+
+    schip._stijl = {
+      bron: schip.soort,
+      soort,
+      romp,
+      // Een witte romp krijgt een rand in zijn accentkleur, een gekleurde
+      // romp gewoon een donkerdere versie van zichzelf.
+      rand: helder > 200
+        ? rgbNaarString(schaalKleur(hexNaarRgb(accent), 0.75))
+        : rgbNaarString(schaalKleur(rompRgb, 0.6)),
+      dek: rgbNaarString(helder > 200
+        ? [236, 240, 244]
+        : mengKleur(schaalKleur(rompRgb, 0.78), [70, 76, 86], 0.35)),
+      accent,
+      accent2,
+      containers,
+      zeil: kies(ZEILKLEUREN, 4),
+      fok: kies(ZEILKLEUREN, 5),
+      tankDek: kies(['#5f7353', '#8a3b2e', '#6a7380', '#3f6b5a'], 6),
+      zeilKant: hashPositie(seed, 99) < 0.5 ? -1 : 1,
+    };
+    return schip._stijl;
+  }
+
+  /**
+   * Een schip van bovenaf, gedraaid in de vaarrichting. Elke soort heeft
+   * een eigen silhouet en opbouw: containers op een vrachtschip, tankkoepels
+   * op een tanker, een stuurhut met fenders op een sleepboot, een zeil op
+   * een zeilboot. Vaart hij, dan trekt hij een kielzog achter zich aan.
+   * Geeft de getekende lengte terug, voor de selectiering.
+   */
+  tekenSchip(ctx, x, y, schaal, hoek, schip) {
+    const st = this.schipStijl(schip);
+    const soort = st.soort;
+    const lengte = schip.lengte;
+    const basis = lengte
+      ? (lengte > 150 ? 38 : lengte > 80 ? 32 : lengte > 40 ? 26 : lengte > 15 ? 21 : 18)
+      : SCHIP_STANDAARDLENGTE[soort];
+    const l = basis * schaal;
+    const b = l * SCHIP_BREEDTE[soort];
+    const h = l / 2, k = b / 2;
+    const s = schaal;
+    const donker = this.theme === 'dark';
+    // 's Nachts branden de lichten achter de ramen
+    const ruit = donker ? '#ffd27a' : '#1e3550';
+    const wit = donker ? '#dfe5ec' : '#ffffff';
 
     ctx.save();
     ctx.translate(x, y);
-    ctx.rotate(hoek);
 
+    // Schaduw recht onder het schip, niet mee gedraaid met de koers
     ctx.fillStyle = this.colors.schaduw;
     ctx.beginPath();
-    ctx.ellipse(0, b * 0.32, l * 0.5, b * 0.34, 0, 0, TAU);
+    ctx.ellipse(0, 2 * s, h * 1.02, k * 1.15, hoek, 0, TAU);
     ctx.fill();
 
-    ctx.fillStyle = kleur;
-    ctx.beginPath();
-    ctx.moveTo(l * 0.5, 0);            // boeg
-    ctx.lineTo(l * 0.12, -b / 2);
-    ctx.lineTo(-l * 0.5, -b / 2);      // spiegel
-    ctx.lineTo(-l * 0.5, b / 2);
-    ctx.lineTo(l * 0.12, b / 2);
-    ctx.closePath();
-    ctx.fill();
+    ctx.rotate(hoek);
 
-    // Opbouw als klein blokje achterop
-    ctx.fillStyle = this.colors.busRuit;
-    ctx.fillRect(-l * 0.36, -b * 0.22, l * 0.22, b * 0.44);
+    // Kielzog: twee uitwaaierende golflijnen plus schuim achter de spiegel
+    const kn = schip.snelheid || 0;
+    if (kn > 0.8) {
+      const lang = l * Math.min(0.9, 0.25 + kn / 25);
+      const schuim = donker ? 'rgba(190,220,245,0.30)' : 'rgba(255,255,255,0.80)';
+      ctx.strokeStyle = schuim;
+      ctx.lineWidth = Math.max(0.8, 1.1 * s);
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      for (const z of [-1, 1]) {
+        ctx.moveTo(h * 0.55, z * k * 0.7);
+        ctx.quadraticCurveTo(-h * 0.2, z * k * 1.15, -h - lang, z * (k * 1.1 + lang * 0.2));
+      }
+      ctx.stroke();
+      ctx.fillStyle = donker ? 'rgba(190,220,245,0.18)' : 'rgba(255,255,255,0.55)';
+      ctx.beginPath();
+      ctx.ellipse(-h - lang * 0.3, 0, lang * 0.42, k * 0.7, 0, 0, TAU);
+      ctx.fill();
+      // Boeggolf
+      ctx.fillStyle = schuim;
+      ctx.beginPath();
+      ctx.ellipse(h * 0.98, 0, 1.6 * s, k * 0.55, 0, 0, TAU);
+      ctx.fill();
+    }
+
+    // Romp
+    const vorm = soort === 'sleepboot' ? 'rond'
+      : (soort === 'vracht' || soort === 'tanker') ? 'blok' : 'spits';
+    rompPad(ctx, l, b, vorm);
+    ctx.fillStyle = st.romp;
+    ctx.fill();
+    ctx.lineWidth = soort === 'sleepboot' ? Math.max(1.4, 1.9 * s) : Math.max(0.8, 0.8 * s);
+    ctx.strokeStyle = soort === 'sleepboot' ? '#1b1d21' : st.rand;
+    ctx.stroke();
+
+    // Dek: een iets kleinere romp erbinnen
+    const dek = (kleur, fx, fy) => {
+      ctx.save();
+      ctx.scale(fx, fy);
+      rompPad(ctx, l, b, vorm);
+      ctx.fillStyle = kleur;
+      ctx.fill();
+      ctx.restore();
+    };
+    // Stuurhut/brug met een rij ramen aan de voorkant
+    const brug = (x0, x1, breedte, kleur = wit) => {
+      ctx.fillStyle = kleur;
+      afgerondeRechthoek(ctx, x0, -breedte / 2, x1 - x0, breedte, 1.2 * s);
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(0,0,0,0.25)';
+      ctx.lineWidth = Math.max(0.5, 0.5 * s);
+      ctx.stroke();
+      ctx.fillStyle = ruit;
+      afgerondeRechthoek(ctx, x1 - Math.max(1.1, 1.3 * s), -breedte * 0.42,
+                         Math.max(0.9, 1 * s), breedte * 0.84, 0.5 * s);
+      ctx.fill();
+    };
+    const schoorsteen = (cx, r) => {
+      ctx.fillStyle = st.accent;
+      ctx.beginPath();
+      ctx.ellipse(cx, 0, r * 1.25, r, 0, 0, TAU);
+      ctx.fill();
+      ctx.fillStyle = '#1b1d21';
+      ctx.beginPath();
+      ctx.ellipse(cx, 0, r * 0.55, r * 0.45, 0, 0, TAU);
+      ctx.fill();
+    };
+
+    switch (soort) {
+      case 'vracht': {
+        dek('#4a4f57', 0.9, 0.78);
+        // Containers in twee rijen, elk vak een eigen kleur
+        const x0 = -h * 0.5, x1 = h * 0.7;
+        const n = Math.max(3, Math.min(12, Math.round((x1 - x0) / (3.6 * s))));
+        const vak = (x1 - x0) / n;
+        const gat = Math.max(0.4, 0.45 * s);
+        for (let i = 0; i < n; i++) {
+          for (let r = 0; r < 2; r++) {
+            ctx.fillStyle = st.containers[(i * 2 + r) % st.containers.length];
+            const cy = r === 0 ? -k * 0.66 : gat / 2;
+            ctx.fillRect(x0 + i * vak + gat / 2, cy, vak - gat, k * 0.66 - gat / 2);
+          }
+        }
+        // Een lichte ribbel over elke rij containers geeft ze reliëf
+        ctx.fillStyle = 'rgba(255,255,255,0.22)';
+        for (let i = 0; i < n; i++) {
+          ctx.fillRect(x0 + i * vak + gat / 2, -k * 0.66, vak - gat, Math.max(0.5, 0.45 * s));
+        }
+        brug(-h * 0.86, -h * 0.58, b * 0.86);
+        schoorsteen(-h * 0.74, k * 0.22);
+        break;
+      }
+      case 'tanker': {
+        dek(st.tankDek, 0.9, 0.78);
+        // Pijpleiding over het midden met een verdeelstuk halverwege
+        ctx.strokeStyle = '#d8dde3';
+        ctx.lineWidth = Math.max(0.7, 0.8 * s);
+        ctx.beginPath();
+        ctx.moveTo(-h * 0.5, 0);
+        ctx.lineTo(h * 0.75, 0);
+        ctx.moveTo(h * 0.1, -k * 0.6);
+        ctx.lineTo(h * 0.1, k * 0.6);
+        ctx.stroke();
+        // Tankkoepels
+        ctx.fillStyle = '#e6e9ed';
+        ctx.strokeStyle = 'rgba(0,0,0,0.3)';
+        ctx.lineWidth = Math.max(0.5, 0.5 * s);
+        for (const fx of [-0.32, -0.05, 0.3, 0.56]) {
+          ctx.beginPath();
+          ctx.arc(h * fx, 0, k * 0.32, 0, TAU);
+          ctx.fill();
+          ctx.stroke();
+        }
+        brug(-h * 0.86, -h * 0.58, b * 0.86);
+        schoorsteen(-h * 0.74, k * 0.22);
+        break;
+      }
+      case 'passagier': {
+        // Gekleurde band langs de hele romp
+        ctx.save();
+        ctx.scale(0.92, 0.82);
+        rompPad(ctx, l, b, vorm);
+        ctx.strokeStyle = st.accent;
+        ctx.lineWidth = Math.max(1, 1.5 * s);
+        ctx.stroke();
+        ctx.restore();
+        // Opbouw met twee rijen ramen
+        ctx.fillStyle = wit;
+        afgerondeRechthoek(ctx, -h * 0.66, -k * 0.6, h * 1.2, k * 1.2, 2 * s);
+        ctx.fill();
+        ctx.fillStyle = ruit;
+        const n = Math.max(4, Math.round(h * 1.1 / (2.4 * s)));
+        const stap = h * 1.1 / n;
+        for (let i = 0; i < n; i++) {
+          const rx = -h * 0.6 + i * stap + stap * 0.2;
+          ctx.fillRect(rx, -k * 0.5, stap * 0.6, k * 0.16);
+          ctx.fillRect(rx, k * 0.34, stap * 0.6, k * 0.16);
+        }
+        // Bovendek in de tweede kleur, brug met ramen voorop
+        ctx.fillStyle = st.accent2;
+        afgerondeRechthoek(ctx, -h * 0.4, -k * 0.22, h * 0.6, k * 0.44, 1 * s);
+        ctx.fill();
+        ctx.fillStyle = ruit;
+        afgerondeRechthoek(ctx, h * 0.42, -k * 0.5, Math.max(1.2, 1.5 * s), k, 0.6 * s);
+        ctx.fill();
+        schoorsteen(-h * 0.52, k * 0.2);
+        break;
+      }
+      case 'sneldienst': {
+        // Slanke romp met een schuine accentstreep
+        ctx.fillStyle = st.accent;
+        ctx.beginPath();
+        ctx.moveTo(-h * 0.95, -k * 0.9);
+        ctx.lineTo(-h * 0.6, -k * 0.9);
+        ctx.lineTo(-h * 0.3, k * 0.9);
+        ctx.lineTo(-h * 0.65, k * 0.9);
+        ctx.closePath();
+        ctx.fill();
+        // Lange cabine met getint glas en een glimlicht
+        ctx.fillStyle = donker ? '#5a4a2a' : '#22384f';
+        afgerondeRechthoek(ctx, -h * 0.5, -k * 0.62, h * 1.05, k * 1.24, k * 0.5);
+        ctx.fill();
+        ctx.fillStyle = donker ? 'rgba(255,210,122,0.55)' : 'rgba(170,215,245,0.6)';
+        afgerondeRechthoek(ctx, -h * 0.4, -k * 0.42, h * 0.85, k * 0.3, k * 0.15);
+        ctx.fill();
+        ctx.fillStyle = st.accent2;
+        ctx.fillRect(-h * 0.15, -k * 0.12, h * 0.4, k * 0.24);
+        break;
+      }
+      case 'sleepboot': {
+        dek(st.dek, 0.84, 0.74);
+        // Stuurhut voorop, met ramen rondom en een gele zwaailamp
+        ctx.fillStyle = wit;
+        afgerondeRechthoek(ctx, -h * 0.05, -k * 0.55, h * 0.55, k * 1.1, 1.6 * s);
+        ctx.fill();
+        ctx.strokeStyle = ruit;
+        ctx.lineWidth = Math.max(0.8, 1 * s);
+        afgerondeRechthoek(ctx, h * 0.03, -k * 0.42, h * 0.39, k * 0.84, 1 * s);
+        ctx.stroke();
+        ctx.fillStyle = '#ffcc33';
+        ctx.beginPath();
+        ctx.arc(h * 0.22, 0, Math.max(0.8, 1 * s), 0, TAU);
+        ctx.fill();
+        // Sleephaak en bolder achterop
+        ctx.fillStyle = '#1b1d21';
+        ctx.beginPath();
+        ctx.arc(-h * 0.55, 0, Math.max(0.9, 1.1 * s), 0, TAU);
+        ctx.fill();
+        break;
+      }
+      case 'visser': {
+        dek('#b98a56', 0.86, 0.74);
+        // Gieken met netten aan weerszijden
+        ctx.strokeStyle = donker ? '#9aa5b2' : '#3a3f47';
+        ctx.lineWidth = Math.max(0.6, 0.7 * s);
+        ctx.beginPath();
+        ctx.moveTo(-h * 0.05, -k * 0.6);
+        ctx.lineTo(-h * 0.35, -k * 2.1);
+        ctx.moveTo(-h * 0.05, k * 0.6);
+        ctx.lineTo(-h * 0.35, k * 2.1);
+        ctx.stroke();
+        ctx.fillStyle = st.accent2;
+        for (const z of [-1, 1]) {
+          ctx.beginPath();
+          ctx.arc(-h * 0.35, z * k * 2.1, Math.max(0.8, 1 * s), 0, TAU);
+          ctx.fill();
+        }
+        brug(h * 0.12, h * 0.48, b * 0.66);
+        // Oranje boeien en een viskist achterop
+        ctx.fillStyle = '#ff7a1a';
+        for (const [fx, fy] of [[-0.62, -0.3], [-0.72, 0.25], [-0.5, 0.35]]) {
+          ctx.beginPath();
+          ctx.arc(h * fx, k * fy, Math.max(0.7, 0.85 * s), 0, TAU);
+          ctx.fill();
+        }
+        ctx.fillStyle = '#3b8fd0';
+        ctx.fillRect(-h * 0.35, -k * 0.3, h * 0.22, k * 0.6);
+        break;
+      }
+      case 'zeilboot': {
+        dek('#c89a62', 0.84, 0.72);
+        // Kuip achterin
+        ctx.fillStyle = donker ? '#3a2e22' : '#8a6a44';
+        afgerondeRechthoek(ctx, -h * 0.72, -k * 0.4, h * 0.42, k * 0.8, 1 * s);
+        ctx.fill();
+        // Grootzeil: van de mast naar het eind van de giek, bol in de wind
+        const mx = h * 0.18;
+        const gx = -h * 0.7, gy = st.zeilKant * k * 1.25;
+        ctx.fillStyle = st.zeil;
+        ctx.strokeStyle = 'rgba(0,0,0,0.3)';
+        ctx.lineWidth = Math.max(0.5, 0.5 * s);
+        ctx.beginPath();
+        ctx.moveTo(mx, 0);
+        ctx.quadraticCurveTo((mx + gx) / 2 + 0, gy * 1.4, gx, gy);
+        ctx.lineTo(mx, 0);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+        // Fok voor de mast
+        ctx.fillStyle = st.fok === st.zeil ? wit : st.fok;
+        ctx.beginPath();
+        ctx.moveTo(h * 0.95, 0);
+        ctx.quadraticCurveTo(h * 0.6, st.zeilKant * k * 1.1, mx - h * 0.05, st.zeilKant * k * 0.75);
+        ctx.lineTo(mx, 0);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+        // Giek en mast
+        ctx.strokeStyle = '#2b3038';
+        ctx.lineWidth = Math.max(0.6, 0.7 * s);
+        ctx.beginPath();
+        ctx.moveTo(mx, 0);
+        ctx.lineTo(gx, gy);
+        ctx.stroke();
+        ctx.fillStyle = '#2b3038';
+        ctx.beginPath();
+        ctx.arc(mx, 0, Math.max(0.8, 0.9 * s), 0, TAU);
+        ctx.fill();
+        break;
+      }
+      case 'plezier': {
+        // Accentstreep langs de romp
+        ctx.save();
+        ctx.scale(0.9, 0.8);
+        rompPad(ctx, l, b, vorm);
+        ctx.strokeStyle = st.accent;
+        ctx.lineWidth = Math.max(0.9, 1.2 * s);
+        ctx.stroke();
+        ctx.restore();
+        dek(donker ? '#c9c2b4' : '#f1ece0', 0.78, 0.64);
+        // Voorruit in een boog, kussens in de kuip, buitenboordmotor
+        ctx.strokeStyle = ruit;
+        ctx.lineWidth = Math.max(1, 1.3 * s);
+        ctx.beginPath();
+        ctx.ellipse(h * 0.15, 0, h * 0.22, k * 0.62, 0, -Math.PI * 0.42, Math.PI * 0.42);
+        ctx.stroke();
+        ctx.fillStyle = st.accent2;
+        afgerondeRechthoek(ctx, -h * 0.6, -k * 0.45, h * 0.5, k * 0.9, 1 * s);
+        ctx.fill();
+        ctx.fillStyle = '#1b1d21';
+        afgerondeRechthoek(ctx, -h - 1.6 * s, -k * 0.22, 2 * s, k * 0.44, 0.6 * s);
+        ctx.fill();
+        break;
+      }
+      default: {
+        dek(st.dek, 0.86, 0.74);
+        // Gele band over de boeg en een witte kajuit met ramen
+        ctx.fillStyle = '#f2c12e';
+        ctx.fillRect(h * 0.45, -k * 0.55, Math.max(1, 1.2 * s), k * 1.1);
+        brug(-h * 0.55, h * 0.1, b * 0.6);
+        ctx.fillStyle = ruit;
+        ctx.fillRect(-h * 0.45, -b * 0.3 + 0.6 * s, h * 0.45, Math.max(0.6, 0.6 * s));
+        ctx.fillRect(-h * 0.45, b * 0.3 - 1.2 * s, h * 0.45, Math.max(0.6, 0.6 * s));
+      }
+    }
+
+    // Navigatielichten: rood aan bakboord, groen aan stuurboord
+    if (l > 16) {
+      const r = Math.max(0.7, 0.75 * s);
+      ctx.fillStyle = '#e53935';
+      ctx.beginPath();
+      ctx.arc(h * 0.55, -k * 0.92, r, 0, TAU);
+      ctx.fill();
+      ctx.fillStyle = '#2ecc71';
+      ctx.beginPath();
+      ctx.arc(h * 0.55, k * 0.92, r, 0, TAU);
+      ctx.fill();
+    }
 
     ctx.restore();
+    return l;
   }
 
   /**
@@ -2226,18 +2617,40 @@ export class IsoRenderer {
           : mengKleur(basis, [242, 248, 252], 0.85)),
       wiel: licht < 55 ? 'rgba(240,244,250,0.45)' : c.busWiel,
       rand: rgbNaarString(schaalKleur(basis, 0.62)),
+      // Donkere onderrand (sokkel) en wielkasten
+      rok: rgbNaarString(schaalKleur(basis, 0.68)),
+      // Twee sierstrepen: een lichte en een in de tegenkleur van de lijn,
+      // zodat elke bus twee- of driekleurig wordt in plaats van één vlak.
+      streep: rgbNaarString(licht > 175
+        ? schaalKleur(basis, 0.55)
+        : mengKleur(basis, [255, 255, 255], 0.75)),
+      accent: rgbNaarString(tegenKleur(basis)),
+      // Glasband en deuren: getint glas, 's nachts verlicht
+      glas: this.theme === 'dark'
+        ? 'rgb(255,214,130)'
+        : rgbNaarString(mengKleur(basis, [30, 44, 62], 0.82)),
+      glans: this.theme === 'dark' ? 'rgba(255,255,255,0.25)' : 'rgba(255,255,255,0.38)',
+      airco: this.theme === 'dark' ? '#596475' : '#d9dee4',
     };
     this._busKleuren.set(sleutel, set);
     return set;
   }
 
-  /** Een klein busje in zijaanzicht, gedraaid in de rijrichting. */
+  /**
+   * Een stadsbus in zijaanzicht, gedraaid in de rijrichting. Carrosserie in
+   * de lijnkleur met een donkere sokkel, twee sierstrepen (licht en in de
+   * tegenkleur), een doorlopende glasband met stijlen, twee deuren, een
+   * airco-unit op het dak, een oranje lijnfilmbord, koplamp en achterlicht,
+   * en wielen met naven in hun wielkasten.
+   */
   tekenBus(ctx, x, y, schaal, hoek, geselecteerd, kleur) {
     const c = this.colors;
     const bus = this.busKleuren(kleur);
-    const w = 28 * schaal;
-    const h = 11 * schaal;
-    const r = 3 * schaal;
+    const s = schaal;
+    const w = 30 * s;
+    const h = 12 * s;
+    const r = 3 * s;
+    const donker = this.theme === 'dark';
 
     ctx.save();
     ctx.translate(x, y);
@@ -2256,57 +2669,173 @@ export class IsoRenderer {
     // Schaduw op de grond, mee gedraaid met de bus
     ctx.fillStyle = c.schaduw;
     ctx.beginPath();
-    ctx.ellipse(0, h * 0.16, w * 0.48, h * 0.34, 0, 0, TAU);
+    ctx.ellipse(0, h * 0.16, w * 0.5, h * 0.34, 0, 0, TAU);
     ctx.fill();
 
     ctx.translate(-w / 2, -h);
 
     // 's Nachts schijnen de koplampen vooruit — een zacht schijnsel voor
     // de neus maakt van een donkere kaart meteen een avondkaart.
-    if (this.theme === 'dark') {
+    if (donker) {
       ctx.save();
       ctx.globalAlpha = 0.28;
       ctx.fillStyle = '#ffdf9a';
       ctx.beginPath();
-      ctx.ellipse(w + h * 0.45, h * 0.62, h * 1.05, h * 0.38, 0, 0, TAU);
+      ctx.ellipse(w + h * 0.45, h * 0.72, h * 1.05, h * 0.36, 0, 0, TAU);
       ctx.fill();
       ctx.restore();
     }
 
-    // Wielen
-    ctx.fillStyle = bus.wiel;
-    const wielR = 2.1 * schaal;
-    ctx.beginPath();
-    ctx.arc(w * 0.20, h, wielR, 0, TAU);
-    ctx.arc(w * 0.80, h, wielR, 0, TAU);
+    // Airco-unit op het dak
+    ctx.fillStyle = bus.airco;
+    afgerondeRechthoek(ctx, w * 0.3, -h * 0.13, w * 0.32, h * 0.2, 1 * s);
     ctx.fill();
 
-    // Carrosserie in de kleur van de lijn
+    // Carrosserie: achterkant licht afgerond, de neus wat ronder
+    const carrosserie = () => {
+      ctx.beginPath();
+      ctx.moveTo(r * 0.8, 0);
+      ctx.lineTo(w - r * 1.4, 0);
+      ctx.quadraticCurveTo(w, 0, w, r * 1.4);
+      ctx.lineTo(w, h - r * 0.6);
+      ctx.quadraticCurveTo(w, h, w - r * 0.6, h);
+      ctx.lineTo(r * 0.6, h);
+      ctx.quadraticCurveTo(0, h, 0, h - r * 0.6);
+      ctx.lineTo(0, r * 0.8);
+      ctx.quadraticCurveTo(0, 0, r * 0.8, 0);
+      ctx.closePath();
+    };
+    carrosserie();
     ctx.fillStyle = bus.body;
-    afgerondeRechthoek(ctx, 0, 0, w, h, r);
     ctx.fill();
 
-    // Lichte daklijn geeft het busje een beetje volume
+    // Alles wat hierna komt blijft binnen de carrosserie
+    ctx.save();
+    carrosserie();
+    ctx.clip();
+
+    // Lichte daklijn voor volume
     ctx.fillStyle = bus.dak;
-    afgerondeRechthoek(ctx, 0, 0, w, h * 0.34, r);
+    ctx.fillRect(0, 0, w, h * 0.16);
+
+    // Sokkel en sierstrepen
+    ctx.fillStyle = bus.rok;
+    ctx.fillRect(0, h * 0.8, w, h * 0.2);
+    ctx.fillStyle = bus.streep;
+    ctx.fillRect(0, h * 0.66, w, h * 0.07);
+    ctx.fillStyle = bus.accent;
+    ctx.fillRect(0, h * 0.73, w, h * 0.07);
+    // Schuine accentvlag achterop, zoals op veel streekbussen
+    ctx.beginPath();
+    ctx.moveTo(0, h * 0.6);
+    ctx.lineTo(w * 0.16, h * 0.66);
+    ctx.lineTo(w * 0.12, h * 0.8);
+    ctx.lineTo(0, h * 0.8);
+    ctx.closePath();
     ctx.fill();
 
-    // Ramen: vier zijruiten plus een grotere voorruit
-    ctx.fillStyle = bus.ruit;
-    const ry = h * 0.30, rh = h * 0.34;
-    const rw = w * 0.115;
-    for (let i = 0; i < 4; i++) {
-      afgerondeRechthoek(ctx, w * 0.075 + i * (rw + w * 0.045), ry, rw, rh, 1.2 * schaal);
+    // Doorlopende glasband met raamstijlen in de lijnkleur
+    const gy = h * 0.22, gh = h * 0.36;
+    const g0 = w * 0.05, g1 = w * 0.84;
+    ctx.fillStyle = bus.glas;
+    afgerondeRechthoek(ctx, g0, gy, g1 - g0, gh, 1.2 * s);
+    ctx.fill();
+    ctx.fillStyle = bus.body;
+    const stijl = Math.max(0.6, 0.75 * s);
+    for (const f of [0.2, 0.34, 0.56, 0.68]) {
+      ctx.fillRect(w * f - stijl / 2, gy, stijl, gh);
+    }
+
+    // Twee deuren (midden en voor), glas tot bijna op de sokkel
+    const deur = (dx) => {
+      const dw = w * 0.085;
+      ctx.fillStyle = bus.rand;
+      ctx.fillRect(dx - 0.5 * s, gy - 0.4 * s, dw + 1 * s, h * 0.62 + 0.4 * s);
+      ctx.fillStyle = bus.glas;
+      ctx.fillRect(dx, gy, dw / 2 - 0.25 * s, h * 0.58);
+      ctx.fillRect(dx + dw / 2 + 0.25 * s, gy, dw / 2 - 0.25 * s, h * 0.58);
+    };
+    deur(w * 0.43);
+    deur(w * 0.735);
+
+    // Voorruit, iets hoger dan de zijramen
+    ctx.fillStyle = bus.glas;
+    ctx.beginPath();
+    ctx.moveTo(w * 0.86, h * 0.16);
+    ctx.lineTo(w - 0.6 * s, h * 0.16);
+    ctx.quadraticCurveTo(w, h * 0.3, w - 0.4 * s, h * 0.62);
+    ctx.lineTo(w * 0.86, h * 0.62);
+    ctx.closePath();
+    ctx.fill();
+
+    // Glimlicht schuin over het glas
+    ctx.fillStyle = bus.glans;
+    for (const gx of [0.1, 0.38, 0.62, 0.88]) {
+      ctx.beginPath();
+      ctx.moveTo(w * gx, gy + gh);
+      ctx.lineTo(w * gx + 1.6 * s, gy);
+      ctx.lineTo(w * gx + 2.8 * s, gy);
+      ctx.lineTo(w * gx + 1.2 * s, gy + gh);
+      ctx.closePath();
       ctx.fill();
     }
-    afgerondeRechthoek(ctx, w * 0.73, ry, w * 0.16, rh * 1.1, 1.4 * schaal);
+
+    // Lijnfilmbord boven de voorruit
+    ctx.fillStyle = '#1b1d21';
+    ctx.fillRect(w * 0.84, h * 0.03, w * 0.15, h * 0.11);
+    ctx.fillStyle = donker ? '#ffb43a' : '#f59e1b';
+    ctx.fillRect(w * 0.855, h * 0.055, w * 0.12, h * 0.06);
+
+    // Koplamp voorop, achterlicht achterop
+    ctx.fillStyle = donker ? '#fff4c8' : '#fff7d6';
+    afgerondeRechthoek(ctx, w - 1.9 * s, h * 0.66, 1.9 * s, h * 0.12, 0.6 * s);
     ctx.fill();
+    ctx.fillStyle = '#e53935';
+    ctx.fillRect(0, h * 0.42, 1.3 * s, h * 0.2);
+
+    // Wielkasten: donkere halve cirkels in de sokkel
+    const wielR = 2.3 * s;
+    const wielen = [w * 0.2, w * 0.79];
+    ctx.fillStyle = 'rgba(0,0,0,0.45)';
+    ctx.beginPath();
+    for (const wx of wielen) {
+      ctx.moveTo(wx + wielR * 1.3, h);
+      ctx.arc(wx, h, wielR * 1.3, Math.PI, TAU);
+    }
+    ctx.fill();
+
+    ctx.restore(); // einde clip
 
     // Randje voor definitie
     ctx.strokeStyle = bus.rand;
-    ctx.lineWidth = Math.max(0.6, 0.5 * schaal);
-    afgerondeRechthoek(ctx, 0, 0, w, h, r);
+    ctx.lineWidth = Math.max(0.6, 0.5 * s);
+    carrosserie();
     ctx.stroke();
+
+    // Spiegel voorop
+    ctx.strokeStyle = bus.rand;
+    ctx.lineWidth = Math.max(0.6, 0.6 * s);
+    ctx.beginPath();
+    ctx.moveTo(w - 0.5 * s, h * 0.18);
+    ctx.lineTo(w + 1.3 * s, h * 0.12);
+    ctx.lineTo(w + 1.3 * s, h * 0.36);
+    ctx.stroke();
+
+    // Wielen met een lichte naaf
+    ctx.fillStyle = bus.wiel;
+    ctx.beginPath();
+    for (const wx of wielen) {
+      ctx.moveTo(wx + wielR, h);
+      ctx.arc(wx, h, wielR, 0, TAU);
+    }
+    ctx.fill();
+    ctx.fillStyle = donker ? '#8a94a3' : '#c3c9d1';
+    ctx.beginPath();
+    for (const wx of wielen) {
+      ctx.moveTo(wx + wielR * 0.45, h);
+      ctx.arc(wx, h, wielR * 0.45, 0, TAU);
+    }
+    ctx.fill();
 
     ctx.restore();
 
@@ -2678,6 +3207,31 @@ function mengKleur(a, b, t) {
   ];
 }
 
+/**
+ * Een levendige tegenkleur bij een lijnkleur: de tint ruim een derde slag
+ * verder op de kleurencirkel, flink verzadigd. Een grijze lijnkleur heeft
+ * geen tint om van uit te gaan; die krijgt een vast warm oranje.
+ */
+function tegenKleur(rgb) {
+  const [r, g, b] = rgb.map(v => v / 255);
+  const max = Math.max(r, g, b), min = Math.min(r, g, b);
+  const d = max - min;
+  if (d < 0.08) return [242, 140, 40];
+  let tint;
+  if (max === r) tint = ((g - b) / d) % 6;
+  else if (max === g) tint = (b - r) / d + 2;
+  else tint = (r - g) / d + 4;
+  tint = ((tint * 60 + 150) % 360 + 360) % 360;
+  // HSL terug naar RGB met S = 0.75 en L = 0.52
+  const S = 0.75, Lh = 0.52;
+  const C = (1 - Math.abs(2 * Lh - 1)) * S;
+  const X = C * (1 - Math.abs((tint / 60) % 2 - 1));
+  const m = Lh - C / 2;
+  const [r1, g1, b1] = tint < 60 ? [C, X, 0] : tint < 120 ? [X, C, 0] : tint < 180 ? [0, C, X]
+    : tint < 240 ? [0, X, C] : tint < 300 ? [X, 0, C] : [C, 0, X];
+  return [(r1 + m) * 255, (g1 + m) * 255, (b1 + m) * 255];
+}
+
 function schaalKleur(rgb, factor) {
   return [rgb[0] * factor, rgb[1] * factor, rgb[2] * factor];
 }
@@ -2728,6 +3282,43 @@ function afgerondeRechthoek(ctx, x, y, w, h, r) {
   ctx.arcTo(x + w, y + h, x, y + h, straal);
   ctx.arcTo(x, y + h, x, y, straal);
   ctx.arcTo(x, y, x + w, y, straal);
+  ctx.closePath();
+}
+
+/**
+ * Een scheepsromp van bovenaf, boeg naar +x. 'spits' voor jachten en
+ * veerboten, 'blok' voor vracht en tankers (lang recht middenschip),
+ * 'rond' voor de stompe sleepboot.
+ */
+function rompPad(ctx, l, b, vorm) {
+  const h = l / 2, k = b / 2;
+  ctx.beginPath();
+  ctx.moveTo(h, 0);
+  if (vorm === 'rond') {
+    ctx.bezierCurveTo(h, -k * 0.9, h * 0.6, -k, h * 0.2, -k);
+    ctx.lineTo(-h * 0.8, -k);
+    ctx.quadraticCurveTo(-h, -k, -h, -k * 0.6);
+    ctx.lineTo(-h, k * 0.6);
+    ctx.quadraticCurveTo(-h, k, -h * 0.8, k);
+    ctx.lineTo(h * 0.2, k);
+    ctx.bezierCurveTo(h * 0.6, k, h, k * 0.9, h, 0);
+  } else if (vorm === 'blok') {
+    ctx.bezierCurveTo(h * 0.96, -k * 0.7, h * 0.78, -k, h * 0.55, -k);
+    ctx.lineTo(-h * 0.92, -k);
+    ctx.quadraticCurveTo(-h, -k, -h, -k * 0.8);
+    ctx.lineTo(-h, k * 0.8);
+    ctx.quadraticCurveTo(-h, k, -h * 0.92, k);
+    ctx.lineTo(h * 0.55, k);
+    ctx.bezierCurveTo(h * 0.78, k, h * 0.96, k * 0.7, h, 0);
+  } else {
+    ctx.bezierCurveTo(h * 0.75, -k * 0.95, h * 0.2, -k, -h * 0.1, -k);
+    ctx.lineTo(-h * 0.9, -k * 0.92);
+    ctx.quadraticCurveTo(-h, -k * 0.9, -h, -k * 0.6);
+    ctx.lineTo(-h, k * 0.6);
+    ctx.quadraticCurveTo(-h, k * 0.9, -h * 0.9, k * 0.92);
+    ctx.lineTo(-h * 0.1, k);
+    ctx.bezierCurveTo(h * 0.2, k, h * 0.75, k * 0.95, h, 0);
+  }
   ctx.closePath();
 }
 

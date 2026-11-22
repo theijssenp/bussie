@@ -6,7 +6,7 @@
 // De versie-query hier moet gelijk lopen met index.html's <script>-tags:
 // Cloudflare cachet /js/*.js hardnekkig op URL, en zonder query blijft deze
 // import — anders dan de <script>-tag zelf — op een oude cache hangen.
-import { IsoRenderer } from './kaart.js?v=44';
+import { IsoRenderer, SCHIP_KLEUREN } from './kaart.js?v=46';
 import { TegelBron } from './tegels.js?v=33';
 import { decodeerLijnen } from './lijnen.js?v=42';
 
@@ -970,11 +970,6 @@ const SCHIP_NAMEN = {
   zeilboot: 'Zeilschip',
   plezier: 'Plezierjacht',
   overig: 'Onbekend type',
-};
-const SCHIP_KLEUREN = {
-  passagier: '#2f8fd0', sneldienst: '#2f8fd0', vracht: '#7d8a99',
-  tanker: '#9a6b5a', sleepboot: '#e08a3c', visser: '#5aa06e',
-  zeilboot: '#8fb0c4', plezier: '#8fb0c4', overig: '#93a3b0',
 };
 
 /** Kompasrichting in woorden: 20° wordt NNO. */
