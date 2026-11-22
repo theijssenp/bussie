@@ -225,6 +225,10 @@ export class IsoRenderer {
         bebouwing: '#d3cec4',      // platte stadsvlek ver uitgezoomd
         asfalt: '#565d69',         // wegdek onder de buslijnen
         asfaltRand: '#3f4650',
+        routeRand: 'rgba(255,255,255,0.95)',  // lichte omlijsting om een lijn
+        routeSchaduw: 'rgba(30,38,52,0.28)',  // zachte rand daarbuiten
+        routeGrijs: '#a9b6c3',     // lijnen zonder eigen kleur
+        routeGlans: 'rgba(255,255,255,0.45)',
         spoor: '#9aa3ad',          // spoorbed
         spoorBiels: '#f2f5f8',     // dwarsstreepjes erover
         station: '#1a4a86',        // treinstation: rand en naam
@@ -254,6 +258,10 @@ export class IsoRenderer {
         bebouwing: '#212734',      // platte stadsvlek ver uitgezoomd
         asfalt: '#2f3641',         // wegdek onder de buslijnen
         asfaltRand: '#1c222b',
+        routeRand: 'rgba(8,11,16,0.9)',
+        routeSchaduw: 'rgba(0,0,0,0.35)',
+        routeGrijs: '#c3ccd6',
+        routeGlans: 'rgba(255,255,255,0.35)',
         spoor: '#4a5464',          // spoorbed
         spoorBiels: '#161b24',     // dwarsstreepjes erover
         station: '#7fb4d6',        // treinstation: rand en naam
@@ -2413,6 +2421,67 @@ export class IsoRenderer {
     ctx.stroke();
   }
 
+  /**
+   * Dikte van een buslijn en de afstand tussen twee lijnen in een bundel,
+   * bij de huidige zoom. Ver uitgezoomd liggen gedeelde lijnen gewoon over
+   * elkaar — een bundel van twintig lijnen zou daar een snelweg breed
+   * worden. Pas als je de straten ziet schuiven ze uit elkaar.
+   */
+  lijnMaten() {
+    const z = this.cam.zoom;
+    const dikte = z < 0.25 ? 1.7 : Math.max(2.4, Math.min(5, 3.4 * z));
+    const uiteen = Math.max(0, Math.min(1, (z - 0.35) / 0.35));
+    return { dikte, strook: (dikte + 0.9) * uiteen };
+  }
+
+  /** Hoeveel stroken deze route op afstand d opzij ligt (zie bundel.py). */
+  verschuivingOp(route, d) {
+    const pts = route.pts, cum = route.cum;
+    if (!pts || pts.length < 2 || pts[0].length < 3) return 0;
+    const i = Math.min(this.indexBijAfstand(cum, d), pts.length - 2);
+    const seg = cum[i + 1] - cum[i];
+    const t = seg > 0 ? Math.max(0, Math.min(1, (d - cum[i]) / seg)) : 0;
+    return (pts[i][2] || 0) * (1 - t) + (pts[i + 1][2] || 0) * t;
+  }
+
+  /**
+   * Een stuk route naar schermpunten, elk punt zijn eigen aantal stroken
+   * opzij geschoven, loodrecht op de lijn zoals die op het scherm loopt.
+   */
+  schermPunten(pts, stap, strook) {
+    const idx = [];
+    for (let i = 0; i < pts.length; i += stap) idx.push(i);
+    if (idx[idx.length - 1] !== pts.length - 1) idx.push(pts.length - 1);
+    const sx = new Float64Array(idx.length), sy = new Float64Array(idx.length);
+    for (let k = 0; k < idx.length; k++) {
+      const p = this.worldToScreen(pts[idx[k]][0], pts[idx[k]][1]);
+      sx[k] = p.x; sy[k] = p.y;
+    }
+    if (strook > 0 && pts[0].length > 2) {
+      const ox = new Float64Array(idx.length), oy = new Float64Array(idx.length);
+      for (let k = 0; k < idx.length; k++) {
+        const o = pts[idx[k]][2];
+        if (!o) continue;
+        const a = k > 0 ? k - 1 : k, b = k < idx.length - 1 ? k + 1 : k;
+        const dx = sx[b] - sx[a], dy = sy[b] - sy[a];
+        const len = Math.hypot(dx, dy);
+        if (len === 0) continue;
+        const s = strookAfstand(o) * strook / len;
+        // Links van de rijrichting, in een scherm waar y omlaag loopt
+        ox[k] = dy * s;
+        oy[k] = -dx * s;
+      }
+      for (let k = 0; k < idx.length; k++) { sx[k] += ox[k]; sy[k] += oy[k]; }
+    }
+    return { sx, sy };
+  }
+
+  /**
+   * De buslijnen, zoals op een metrokaart: elke lijn een eigen felle streep
+   * met een lichte rand, en lijnen die dezelfde weg delen naast elkaar in
+   * plaats van over elkaar. Lijnen zonder eigen kleur worden lichtgrijs en
+   * liggen onder de gekleurde.
+   */
   tekenLijnen(ctx, bounds) {
     if (!this.lijnen.length) return;
     const z = this.cam.zoom;
@@ -2429,51 +2498,64 @@ export class IsoRenderer {
     // Hoe verder uit, hoe strenger: op landsbreedte wil je het regionale
     // net zien, niet elk stadslijntje van drie kilometer.
     const minLengte = z < 0.05 ? 40000 : z < 0.25 ? 15000 : 0;
-    // De asfaltbaan is ver uitgezoomd niet te onderscheiden van de streep
-    const metAsfalt = z >= 0.25;
-    // De donkere rand eromheen pas als je er iets van ziet
-    const metRand = z >= 0.6;
-    // Breedte van een straat, niet van een snelweg: waar tien lijnen
-    // dezelfde weg delen liep het anders uit op één donkere vlek.
-    const baan = Math.max(3, Math.min(16, 5.5 * z));
+    const { dikte, strook } = this.lijnMaten();
+    const metRand = z >= 0.25;
+    const metGlans = z >= 0.6;
 
-    // Loopt langs elk zichtbaar stuk route; de tekenkant vult zelf in wat
-    // er met een segment moet gebeuren.
-    const overSegmenten = (doe) => {
-      for (const r of this.lijnen) {
-        if (!r._segmenten) continue;
-        if (minLengte && (r.lengte || 0) < minLengte) continue;
-        const actief = this.zichtbaar(r.lijn);
-        for (const seg of r._segmenten) {
-          const b = seg.b;
-          if (b.maxX < bounds.minX || b.minX > bounds.maxX ||
-              b.maxY < bounds.minY || b.minY > bounds.maxY) continue;
-          doe(seg, r, actief);
-        }
+    // Elk zichtbaar stuk één keer projecteren, ingedeeld in drie lagen:
+    // gedimd (weggefilterd), grijs (geen eigen kleur) en gekleurd.
+    const lagen = [[], [], []];
+    for (const r of this.lijnen) {
+      if (!r._segmenten) continue;
+      if (minLengte && (r.lengte || 0) < minLengte) continue;
+      const actief = this.zichtbaar(r.lijn);
+      const grijs = zonderEigenKleur(r.kleur);
+      const laag = gefilterd && !actief ? 0 : grijs ? 1 : 2;
+      const kleur = grijs ? c.routeGrijs : r.kleur;
+      for (const seg of r._segmenten) {
+        const b = seg.b;
+        if (b.maxX < bounds.minX || b.minX > bounds.maxX ||
+            b.maxY < bounds.minY || b.minY > bounds.maxY) continue;
+        if (seg.pts.length < 2) continue;
+        lagen[laag].push({ kleur, s: this.schermPunten(seg.pts, stap, strook) });
+      }
+    }
+
+    // Alles met dezelfde stijl in één pad: dat is sneller, en een
+    // doorschijnende rand stapelt dan niet op waar lijnen elkaar raken.
+    const streep = (items, kleur, breedte) => {
+      if (!items.length) return;
+      ctx.strokeStyle = kleur;
+      ctx.lineWidth = breedte;
+      ctx.beginPath();
+      for (const { s } of items) {
+        ctx.moveTo(s.sx[0], s.sy[0]);
+        for (let k = 1; k < s.sx.length; k++) ctx.lineTo(s.sx[k], s.sy[k]);
+      }
+      ctx.stroke();
+    };
+    const perKleur = (items, breedte, alpha = 1) => {
+      const groepen = new Map();
+      for (const it of items) {
+        const lijst = groepen.get(it.kleur);
+        if (lijst) lijst.push(it);
+        else groepen.set(it.kleur, [it]);
+      }
+      for (const [kleur, lijst] of groepen) {
+        streep(lijst, alpha < 1 ? kleurMetAlpha(kleur, alpha) : kleur, breedte);
       }
     };
 
-    // Eerst het wegdek voor álle routes, in één dekkende kleur. Doordat het
-    // dekkend is stapelt het niet op waar tien lijnen dezelfde straat
-    // delen: je krijgt één asfaltbaan in plaats van een steeds donkerder
-    // wordende vlek. De lijnkleuren komen er daarna als strepen overheen.
-    if (metAsfalt) {
-      if (metRand) {
-        overSegmenten((seg) => this.drawPolyline(ctx, seg.pts, c.asfaltRand, baan + 2, stap));
-      }
-      overSegmenten((seg) => this.drawPolyline(ctx, seg.pts, c.asfalt, baan, stap));
-    }
+    // Weggefilterde lijnen: dun en flauw, zonder rand
+    perKleur(lagen[0], Math.max(1, dikte * 0.55), 0.22);
 
-    // Dan de lijnkleuren: eerst de gedempte, daarna de uitgelichte erop
-    for (const laag of [0, 1]) {
-      overSegmenten((seg, r, actief) => {
-        if ((laag === 0) === actief) return;
-        const kleur = r.kleur || this.colors.route;
-        const dim = gefilterd && !actief;
-        const kern = dim ? 0.22 : (gefilterd ? 0.95 : 0.8);
-        this.drawPolyline(ctx, seg.pts, kleurMetAlpha(kleur, kern),
-                          Math.max(1.2, 2.4 * z), stap);
-      });
+    for (const laag of [lagen[1], lagen[2]]) {
+      if (metRand) {
+        streep(laag, c.routeSchaduw, dikte + 3.4);
+        streep(laag, c.routeRand, dikte + 1.8);
+      }
+      perKleur(laag, dikte);
+      if (metGlans) streep(laag, c.routeGlans, Math.max(0.6, dikte * 0.28));
     }
   }
 
@@ -2516,6 +2598,8 @@ export class IsoRenderer {
       : Math.max(0.75, Math.min(1.9, 0.55 + z * 0.55));
     this._busSchaal = schaal;
 
+    const { strook } = this.lijnMaten();
+
     // Van achter naar voren tekenen zodat bussen elkaar netjes overlappen
     const zichtbaar = [];
     for (const v of this.vehicles) {
@@ -2526,6 +2610,17 @@ export class IsoRenderer {
       if (p.x < -60 || p.x > this.vw + 60 || p.y < -60 || p.y > this.vh + 60) {
         v._sx = undefined; // buiten beeld: niet meer aanwijsbaar
         continue;
+      }
+      // Op zijn eigen strook in de bundel, niet in het midden ervan
+      if (strook > 0 && v._route && pos.d !== undefined &&
+          pos.hoek !== null && pos.hoek !== undefined) {
+        const o = this.verschuivingOp(v._route, pos.d);
+        if (o) {
+          const h = this.schermHoek(pos.hoek);
+          const s = strookAfstand(o) * strook;
+          p.x += Math.sin(h) * s;
+          p.y -= Math.cos(h) * s;
+        }
       }
       v._sx = p.x;
       v._sy = p.y;
@@ -3498,6 +3593,35 @@ function afgerondeRechthoek(ctx, x, y, w, h, r) {
   ctx.arcTo(x, y + h, x, y, straal);
   ctx.arcTo(x, y, x + w, y, straal);
   ctx.closePath();
+}
+
+/**
+ * Lijnen zonder bruikbare eigen kleur: geen kleur, onze standaardkleur, of
+ * (bijna) zwart — dat laatste geven sommige vervoerders al hun streeklijnen,
+ * en tien zwarte strepen naast elkaar lezen als een gat in de kaart.
+ */
+const _zonderKleur = new Map();
+function zonderEigenKleur(kleur) {
+  if (!kleur || kleur === LIJN_STANDAARDKLEUR) return true;
+  let uit = _zonderKleur.get(kleur);
+  if (uit === undefined) {
+    const [r, g, b] = hexNaarRgb(kleur);
+    uit = r * 0.299 + g * 0.587 + b * 0.114 < 40;
+    _zonderKleur.set(kleur, uit);
+  }
+  return uit;
+}
+
+/**
+ * Plek in de bundel (in stroken) naar een afstand in stroken. De binnenste
+ * drie stroken aan elke kant krijgen hun volle breedte; daarbuiten — bij een
+ * busstation waar dertig lijnen samenkomen — schuiven ze half over elkaar,
+ * zodat de bundel geen halve wijk breed wordt.
+ */
+function strookAfstand(o) {
+  const a = Math.abs(o);
+  const v = a <= 3 ? a : 3 + (a - 3) * 0.45;
+  return o < 0 ? -v : v;
 }
 
 /**

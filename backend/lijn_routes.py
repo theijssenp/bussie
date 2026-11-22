@@ -320,6 +320,9 @@ def afstand_langs(pts, cum, x, y):
 # BLN2 draagt per route ook het shape_id, zodat de kaart een bus aan de vorm
 # van zijn eigen rit kan koppelen in plaats van aan de hoofdvorm van de lijn.
 BIN_MAGIC = b"BLN2"
+# BLN3 is BLN2 plus per routepunt één byte: hoeveel kwart-stroken de lijn
+# opzij ligt, omdat hij een weg deelt met andere lijnen (zie bundel.py).
+BIN_MAGIC_BUNDEL = b"BLN3"
 SPRONG = -32768          # dx == dy == dit: hierna volgt een absolute positie
 
 
@@ -328,15 +331,19 @@ def _tekst(b):
     return struct.pack("<B", len(b)) + b
 
 
-def codeer_lijnen(lijnen):
-    """Zet de lijnroutes om naar het binaire formaat dat de browser leest."""
+def codeer_lijnen(lijnen, verschuivingen=None):
+    """
+    Zet de lijnroutes om naar het binaire formaat dat de browser leest.
+    Met verschuivingen (per route een lijst, één waarde per punt) wordt het
+    BLN3, anders BLN2.
+    """
     haltes = {}   # halte-id → (index, halte)
     for r in lijnen:
         for h in r.get("haltes", []):
             if h["id"] not in haltes:
                 haltes[h["id"]] = (len(haltes), h)
 
-    uit = bytearray(BIN_MAGIC)
+    uit = bytearray(BIN_MAGIC_BUNDEL if verschuivingen is not None else BIN_MAGIC)
 
     uit += struct.pack("<I", len(haltes))
     for _, h in haltes.values():
@@ -345,7 +352,7 @@ def codeer_lijnen(lijnen):
         uit += struct.pack("<ii", round(h["x"] * 10), round(h["y"] * 10))
 
     uit += struct.pack("<I", len(lijnen))
-    for r in lijnen:
+    for ri, r in enumerate(lijnen):
         uit += _tekst(r["lijn"].encode("utf-8"))
         uit += struct.pack("<B", r["richting"])
         uit += _tekst(r["naam"].encode("utf-8"))
@@ -374,6 +381,9 @@ def codeer_lijnen(lijnen):
                     uit += struct.pack("<hhii", SPRONG, SPRONG, qx, qy)
             vx, vy = qx, qy
 
+        if verschuivingen is not None:
+            uit += struct.pack(f"<{len(punten)}b", *verschuivingen[ri])
+
         eigen = r.get("haltes", [])
         uit += struct.pack("<H", len(eigen))
         for h in eigen:
@@ -386,7 +396,15 @@ def schrijf_binair(json_pad=OUT_PATH, bin_pad=BIN_PATH):
     """lijnen.json → lijnen.bin. Draait ook los van de zware generator."""
     with open(json_pad, encoding="utf-8") as f:
         lijnen = json.load(f).get("lijnen", [])
-    blob = codeer_lijnen(lijnen)
+    # De bundeling is versiering: lukt die niet, dan liever een kaart met
+    # lijnen over elkaar dan geen kaart.
+    try:
+        from bundel import bereken
+        verschuivingen = bereken(lijnen)
+    except Exception as e:
+        log.warning("Bundelen mislukt (%s), lijnen.bin zonder verschuivingen", e)
+        verschuivingen = None
+    blob = codeer_lijnen(lijnen, verschuivingen)
     tijdelijk = bin_pad + ".tmp"
     with open(tijdelijk, "wb") as f:
         f.write(blob)

@@ -6,6 +6,9 @@
 // ============================================================
 
 const MAGIC = 0x324e4c42; // 'BLN2' little-endian gelezen als uint32
+// BLN3: hetzelfde, plus per routepunt een byte met hoeveel kwart-stroken de
+// lijn opzij ligt omdat hij een weg deelt met andere lijnen.
+const MAGIC_BUNDEL = 0x334e4c42; // 'BLN3'
 const SPRONG = -32768;    // dx == dy == dit: er volgt een absolute positie
 
 /**
@@ -16,7 +19,9 @@ const SPRONG = -32768;    // dx == dy == dit: er volgt een absolute positie
  */
 export function decodeerLijnen(buffer) {
   const dv = new DataView(buffer);
-  if (dv.getUint32(0, true) !== MAGIC) throw new Error('Geen geldige lijnenbundel');
+  const magic = dv.getUint32(0, true);
+  if (magic !== MAGIC && magic !== MAGIC_BUNDEL) throw new Error('Geen geldige lijnenbundel');
+  const metBundel = magic === MAGIC_BUNDEL;
 
   const tekstlezer = new TextDecoder('utf-8');
   const bytes = new Uint8Array(buffer);
@@ -89,6 +94,12 @@ export function decodeerLijnen(buffer) {
         }
       }
       pts[i] = [qx / 10, qy / 10];
+    }
+
+    // Zijwaartse plek in de bundel, in stroken, als derde getal per punt
+    if (metBundel) {
+      for (let i = 0; i < puntAantal; i++) pts[i].push(dv.getInt8(o + i) / 4);
+      o += puntAantal;
     }
 
     const eigenAantal = dv.getUint16(o, true);
