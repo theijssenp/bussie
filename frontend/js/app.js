@@ -92,7 +92,7 @@ async function laadLijnen(poging = 1) {
     // Cloudflare houdt dit bestand vier uur vast, en zonder eigen URL krijgt
     // een bezoeker na een formaatwijziging eerst de oude bundel en daarmee
     // een lege kaart. Verandert het formaat in lijn_routes.py, hoog hem dan op.
-    const resp = await fetch('/data/lijnen.bin?v=43', poging > 1 ? { cache: 'reload' } : undefined);
+    const resp = await fetch('/data/lijnen.bin?v=44', poging > 1 ? { cache: 'reload' } : undefined);
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const lijnen = decodeerLijnen(await resp.arrayBuffer());
 
