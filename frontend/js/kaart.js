@@ -1655,7 +1655,7 @@ export class IsoRenderer {
       const kmu = trein._volger ? trein._volger.snelheid * 3.6 : trein.snelheid;
       if (!vaag) this.tekenSliert(ctx, p.x, p.y, hoek, kmu, schaal, kleur);
       this.tekenTrein(ctx, p.x, p.y, schaal, hoek,
-                      this.hoveredTrein === trein, kleur, bakken);
+                      this.hoveredTrein === trein, kleur, bakken, trein);
       if (vaag) ctx.restore();
     }
 
@@ -2849,21 +2849,90 @@ export class IsoRenderer {
   }
 
   /**
-   * Een treinstel: meerdere gekoppelde bakken achter elkaar, met een spitse
-   * neus vooraan zodat de rijrichting ook zonder kleur leesbaar is. Het
-   * aantal bakken maakt een intercity vanzelf langer dan een sprinter, en
-   * geeft de trein de lengte die hem naast een busje als trein laat lezen.
-   * De kleurafleiding komt van de bussen, dus een eigen kleur werkt net zo.
+   * Het uiterlijk van één trein. Intercity's en sprinters krijgen het
+   * NS-geel met blauw, maar in een paar materieeltypes (dubbeldekker,
+   * koploper, nieuwe intercity; verschillende sprinters), elk met een
+   * eigen kop en indeling. Overige treinen krijgen een regionaal
+   * kleurenschema. Welk type het wordt hangt vast aan het treinnummer.
    */
-  tekenTrein(ctx, x, y, schaal, hoek, geselecteerd, kleur, bakken = 2) {
+  treinStijl(trein, kleur) {
+    const soort = trein?.soort || 'trein';
+    const sleutel = soort + ':' + this.theme + ':' + kleur;
+    if (trein?._tstijl && trein._tstijl.sleutel === sleutel) return trein._tstijl;
+    const seed = (Number(trein?.nummer) || 7) % 2000000000;
+    const kies = (lijst, zout) =>
+      lijst[Math.floor(hashPositie(seed, zout * 7919) * lijst.length) % lijst.length];
+    const donker = this.theme === 'dark';
+    const GEEL = '#ffc917', BLAUW = '#003082';
+
+    let st;
+    if (soort === 'intercity') {
+      const type = kies(['dubbeldekker', 'dubbeldekker', 'nieuw', 'koploper'], 1);
+      st = {
+        type, body: GEEL, onder: BLAUW, streep: '#ffffff',
+        onderHoogte: type === 'dubbeldekker' ? 0.2 : 0.28,
+        kop: type === 'nieuw' ? '#23272e' : BLAUW,
+        deur: '#f2b705', dubbel: type === 'dubbeldekker',
+        neus: type === 'koploper' ? 'hoog' : 'schuin', bakken: 3,
+      };
+    } else if (soort === 'sprinter') {
+      const type = kies(['sng', 'slt', 'flirt'], 1);
+      st = {
+        type, body: GEEL, onder: BLAUW,
+        streep: type === 'slt' ? '#ffffff' : '#9fb3d1',
+        onderHoogte: type === 'flirt' ? 0.24 : 0.16,
+        kop: type === 'sng' ? '#3a3f47' : type === 'flirt' ? BLAUW : '#23272e',
+        deur: type === 'flirt' ? '#2c5fa8' : '#5a6472',
+        dubbel: false, neus: type === 'flirt' ? 'rond' : 'schuin', bakken: 2,
+      };
+    } else {
+      const schema = kies([
+        { body: '#f4f6f8', onder: '#00a3a6', streep: '#e8641a', kop: '#00a3a6', deur: '#007f82' },
+        { body: '#e8edf2', onder: '#d6322f', streep: '#23272e', kop: '#d6322f', deur: '#a8262a' },
+        { body: '#2b5fa8', onder: '#1b2f55', streep: '#7fd0f0', kop: '#1b2f55', deur: '#7fd0f0' },
+        { body: '#f2f2f2', onder: '#2f9e5b', streep: '#f2c12e', kop: '#2f9e5b', deur: '#2f9e5b' },
+      ], 2);
+      st = { type: 'regio', ...schema, onderHoogte: 0.26, dubbel: false, neus: 'rond', bakken: 2 };
+    }
+
+    const bodyRgb = hexNaarRgb(st.body);
+    st.sleutel = sleutel;
+    st.rand = rgbNaarString(schaalKleur(bodyRgb, 0.6));
+    // 's Nachts is de bak gedempt, zodat de verlichte ramen eruit springen
+    // in plaats van op te gaan in het geel.
+    if (donker) {
+      st.body = rgbNaarString(schaalKleur(bodyRgb, 0.72));
+      st.deur = rgbNaarString(schaalKleur(hexNaarRgb(st.deur), 0.72));
+    }
+    st.kader = rgbNaarString(schaalKleur(bodyRgb, 0.45));
+    st.dak = donker ? '#5a6270' : '#c9ced6';
+    st.dakApparatuur = donker ? '#454c58' : '#9aa2ad';
+    st.glas = donker ? '#ffd68a' : '#1f2a38';
+    st.glans = donker ? 'rgba(255,255,255,0.22)' : 'rgba(255,255,255,0.32)';
+    st.wiel = donker ? '#4a5260' : '#2b3038';
+    if (trein) trein._tstijl = st;
+    return st;
+  }
+
+  /**
+   * Een treinstel in zijaanzicht: gekoppelde bakken met aan beide einden
+   * een cabine. Gele bak met blauwe onderkant, witte sierstreep, ramen
+   * (bij een dubbeldekker twee rijen), deuren, draaistellen met wielen,
+   * balgen tussen de bakken, apparatuur en een pantograaf op het dak, en
+   * koplampen voor en rode sluitlichten achter.
+   */
+  tekenTrein(ctx, x, y, schaal, hoek, geselecteerd, kleur, bakken = 2, treinData = null) {
     const c = this.colors;
-    const trein = this.busKleuren(kleur);
-    const bakL = 21 * schaal;          // lengte van één rijtuig
-    const kier = 2.4 * schaal;         // koppeling ertussen
+    const st = this.treinStijl(treinData, kleur);
+    const s = schaal;
+    bakken = st.bakken || bakken;
+    const bakL = 24 * s;               // lengte van één rijtuig
+    const kier = 2.4 * s;              // balg ertussen
     const w = bakken * bakL + (bakken - 1) * kier;
-    const h = 12 * schaal;
-    const neus = bakL * 0.3;
-    const r = 2.6 * schaal;
+    const h = (st.dubbel ? 15 : 12.5) * s;
+    const neus = bakL * 0.24;
+    const r = 2.4 * s;
+    const donker = this.theme === 'dark';
 
     ctx.save();
     ctx.translate(x, y);
@@ -2881,93 +2950,239 @@ export class IsoRenderer {
     // Schaduw over de hele lengte
     ctx.fillStyle = c.schaduw;
     ctx.beginPath();
-    ctx.ellipse(0, h * 0.16, w * 0.5, h * 0.26, 0, 0, TAU);
+    ctx.ellipse(0, h * 0.14, w * 0.51, h * 0.24, 0, 0, TAU);
     ctx.fill();
 
     ctx.translate(-w / 2, -h);
 
-    // 's Nachts schijnen de koplampen vooruit — een zacht schijnsel voor
-    // de neus maakt van een donkere kaart meteen een avondkaart.
-    if (this.theme === 'dark') {
+    // 's Nachts schijnen de koplampen vooruit
+    if (donker) {
       ctx.save();
       ctx.globalAlpha = 0.28;
       ctx.fillStyle = '#ffdf9a';
       ctx.beginPath();
-      ctx.ellipse(w + h * 0.45, h * 0.62, h * 1.05, h * 0.38, 0, 0, TAU);
+      ctx.ellipse(w + h * 0.5, h * 0.8, h * 1.1, h * 0.3, 0, 0, TAU);
       ctx.fill();
       ctx.restore();
     }
 
-    // De omtrek van één bak; de voorste krijgt de neus
-    const bakPad = (x0, kop) => {
-      if (!kop) {
-        afgerondeRechthoek(ctx, x0, 0, bakL, h, r);
-        return;
-      }
+    // De omtrek van één bak. Een kopbak krijgt een cabine: 'schuin' is een
+    // hellende voorruit, 'hoog' de opgetilde cabine van een koploper en
+    // 'rond' een gestroomlijnde neus. Achteraan gespiegeld.
+    const bakPad = (x0, voor, achter) => {
+      const kant = (punt, richting) => {
+        // punt: x van het uiteinde; richting +1 = voorkant, -1 = achterkant
+        const ox = (dx) => punt - richting * dx;
+        if (st.neus === 'hoog') {
+          ctx.lineTo(ox(neus), 0);
+          ctx.quadraticCurveTo(ox(neus * 0.2), h * 0.05, ox(neus * 0.12), h * 0.4);
+          ctx.lineTo(ox(0), h * 0.56);
+          ctx.lineTo(ox(0), h - r * 0.5);
+        } else if (st.neus === 'rond') {
+          ctx.lineTo(ox(neus), 0);
+          ctx.bezierCurveTo(ox(neus * 0.2), 0, ox(0), h * 0.3, ox(0), h * 0.62);
+          ctx.lineTo(ox(0), h - r * 0.5);
+        } else {
+          ctx.lineTo(ox(neus * 0.9), 0);
+          ctx.quadraticCurveTo(ox(neus * 0.35), h * 0.02, ox(neus * 0.08), h * 0.5);
+          ctx.lineTo(ox(0), h * 0.66);
+          ctx.lineTo(ox(0), h - r * 0.5);
+        }
+      };
+      const x1 = x0 + bakL;
       ctx.beginPath();
-      ctx.moveTo(x0 + r, 0);
-      ctx.lineTo(x0 + bakL - neus, 0);
-      ctx.lineTo(x0 + bakL, h * 0.5);
-      ctx.lineTo(x0 + bakL - neus, h);
-      ctx.lineTo(x0 + r, h);
-      ctx.arcTo(x0, h, x0, h - r, r);
-      ctx.lineTo(x0, r);
-      ctx.arcTo(x0, 0, x0 + r, 0, r);
+      // Bovenkant van achter naar voor, dan de voorkant omlaag
+      ctx.moveTo(achter ? x0 + neus : x0 + r, 0);
+      if (voor) kant(x1, 1);
+      else { ctx.lineTo(x1 - r, 0); ctx.arcTo(x1, 0, x1, r, r); ctx.lineTo(x1, h - r * 0.5); }
+      ctx.lineTo(x1, h);
+      ctx.lineTo(x0, h);
+      // Achterkant omhoog
+      if (achter) {
+        ctx.lineTo(x0, h - r * 0.5);
+        // dezelfde vorm gespiegeld, nu van onder naar boven
+        if (st.neus === 'hoog') {
+          ctx.lineTo(x0, h * 0.56);
+          ctx.lineTo(x0 + neus * 0.12, h * 0.4);
+          ctx.quadraticCurveTo(x0 + neus * 0.2, h * 0.05, x0 + neus, 0);
+        } else if (st.neus === 'rond') {
+          ctx.lineTo(x0, h * 0.62);
+          ctx.bezierCurveTo(x0, h * 0.3, x0 + neus * 0.2, 0, x0 + neus, 0);
+        } else {
+          ctx.lineTo(x0, h * 0.66);
+          ctx.lineTo(x0 + neus * 0.08, h * 0.5);
+          ctx.quadraticCurveTo(x0 + neus * 0.35, h * 0.02, x0 + neus * 0.9, 0);
+        }
+      } else {
+        ctx.lineTo(x0, r);
+        ctx.arcTo(x0, 0, x0 + r, 0, r);
+      }
       ctx.closePath();
     };
 
     const x0Van = (i) => i * (bakL + kier);
 
-    // Koppelingen tussen de bakken
-    ctx.fillStyle = trein.wiel;
+    // Balgen tussen de bakken: donker harmonicastuk met een paar plooien
     for (let i = 0; i < bakken - 1; i++) {
-      ctx.fillRect(x0Van(i) + bakL, h * 0.40, kier, h * 0.22);
+      const bx = x0Van(i) + bakL;
+      ctx.fillStyle = '#2b3038';
+      ctx.fillRect(bx - 0.3 * s, h * 0.14, kier + 0.6 * s, h * 0.76);
+      ctx.fillStyle = 'rgba(255,255,255,0.18)';
+      ctx.fillRect(bx + kier * 0.3, h * 0.14, Math.max(0.4, 0.35 * s), h * 0.76);
+      ctx.fillRect(bx + kier * 0.65, h * 0.14, Math.max(0.4, 0.35 * s), h * 0.76);
     }
 
+    const wielR = 1.35 * s;
     for (let i = 0; i < bakken; i++) {
       const x0 = x0Van(i);
-      const kop = i === bakken - 1;   // voorste bak
+      const voor = i === bakken - 1;
+      const achter = i === 0;
 
-      // Bogies: bij een trein zitten de wielen vrijwel onder de bak
-      // verstopt, dus subtiele balkjes in plaats van ronde buswielen.
-      ctx.fillStyle = trein.wiel;
-      const bogieW = bakL * 0.19, bogieH = 1.7 * schaal;
-      ctx.fillRect(x0 + bakL * 0.13, h - bogieH * 0.35, bogieW, bogieH);
-      ctx.fillRect(x0 + bakL * 0.66, h - bogieH * 0.35, bogieW, bogieH);
+      // Draaistellen: een donker frame met twee wielen
+      for (const f of [0.2, 0.8]) {
+        const bx = x0 + bakL * f;
+        ctx.fillStyle = st.wiel;
+        ctx.fillRect(bx - bakL * 0.1, h - 0.6 * s, bakL * 0.2, 1.4 * s);
+        ctx.beginPath();
+        ctx.arc(bx - bakL * 0.05, h + 0.5 * s, wielR, 0, TAU);
+        ctx.arc(bx + bakL * 0.05, h + 0.5 * s, wielR, 0, TAU);
+        ctx.fill();
+        ctx.fillStyle = donker ? '#7a8494' : '#b5bcc6';
+        ctx.beginPath();
+        ctx.arc(bx - bakL * 0.05, h + 0.5 * s, wielR * 0.4, 0, TAU);
+        ctx.arc(bx + bakL * 0.05, h + 0.5 * s, wielR * 0.4, 0, TAU);
+        ctx.fill();
+      }
 
       // Carrosserie
-      ctx.fillStyle = trein.body;
-      bakPad(x0, kop);
+      bakPad(x0, voor, achter);
+      ctx.fillStyle = st.body;
       ctx.fill();
 
-      // Daklijn geeft volume
-      ctx.fillStyle = trein.dak;
-      afgerondeRechthoek(ctx, x0, 0, bakL - (kop ? neus * 0.55 : 0), h * 0.27, r * 0.8);
-      ctx.fill();
+      ctx.save();
+      bakPad(x0, voor, achter);
+      ctx.clip();
 
-      // Doorlopende ramenstrook per bak
-      ctx.fillStyle = trein.ruit;
-      afgerondeRechthoek(ctx, x0 + bakL * 0.09, h * 0.34,
-                         bakL * (kop ? 0.6 : 0.82), h * 0.29, 1 * schaal);
-      ctx.fill();
+      // Dak, onderkant en sierstreep
+      ctx.fillStyle = st.dak;
+      ctx.fillRect(x0, 0, bakL, h * 0.1);
+      ctx.fillStyle = st.onder;
+      ctx.fillRect(x0, h * (1 - st.onderHoogte), bakL, h * st.onderHoogte);
+      ctx.fillStyle = st.streep;
+      ctx.fillRect(x0, h * (1 - st.onderHoogte) - h * 0.06, bakL, h * 0.05);
+
+      // Ramen: één doorlopende band, of twee bij een dubbeldekker. Waar de
+      // cabines zitten blijft de band vrij.
+      const r0 = x0 + (achter ? neus * 1.25 : bakL * 0.05);
+      const r1 = x0 + bakL - (voor ? neus * 1.25 : bakL * 0.05);
+      const banden = st.dubbel
+        ? [[h * 0.17, h * 0.2], [h * 0.47, h * 0.2]]
+        : [[h * 0.24, h * 0.3]];
+      for (const [by, bh] of banden) {
+        ctx.fillStyle = st.glas;
+        afgerondeRechthoek(ctx, r0, by, r1 - r0, bh, 0.8 * s);
+        ctx.fill();
+        ctx.strokeStyle = st.kader;
+        ctx.lineWidth = Math.max(0.5, 0.5 * s);
+        ctx.stroke();
+        // Raamstijlen
+        ctx.fillStyle = st.body;
+        const n = Math.max(2, Math.round((r1 - r0) / (4.2 * s)));
+        const stap = (r1 - r0) / n;
+        for (let j = 1; j < n; j++) {
+          ctx.fillRect(r0 + j * stap - 0.35 * s, by, Math.max(0.5, 0.7 * s), bh);
+        }
+        // Glimlicht
+        ctx.fillStyle = st.glans;
+        for (let j = 0; j < n; j += 2) {
+          const gx = r0 + j * stap + stap * 0.25;
+          ctx.beginPath();
+          ctx.moveTo(gx, by + bh);
+          ctx.lineTo(gx + 1.2 * s, by);
+          ctx.lineTo(gx + 2.1 * s, by);
+          ctx.lineTo(gx + 0.9 * s, by + bh);
+          ctx.closePath();
+          ctx.fill();
+        }
+      }
+
+      // Deuren: twee per bak, met eigen kleur en een raampje per deurblad
+      const deurW = bakL * 0.1;
+      const deurPos = [];
+      if (!achter) deurPos.push(x0 + bakL * 0.18);
+      else deurPos.push(x0 + neus * 1.35);
+      if (!voor) deurPos.push(x0 + bakL * 0.72);
+      else deurPos.push(x0 + bakL - neus * 1.35 - deurW);
+      for (const dx of deurPos) {
+        const dy = st.dubbel ? h * 0.42 : h * 0.18;
+        ctx.fillStyle = st.deur;
+        ctx.fillRect(dx, dy, deurW, h * 0.92 - dy);
+        ctx.fillStyle = st.glas;
+        const gh = (h * 0.92 - dy) * 0.42;
+        ctx.fillRect(dx + 0.5 * s, dy + 0.8 * s, deurW / 2 - 0.75 * s, gh);
+        ctx.fillRect(dx + deurW / 2 + 0.25 * s, dy + 0.8 * s, deurW / 2 - 0.75 * s, gh);
+        ctx.fillStyle = 'rgba(0,0,0,0.3)';
+        ctx.fillRect(dx + deurW / 2 - 0.2 * s, dy, Math.max(0.4, 0.4 * s), h * 0.92 - dy);
+      }
+
+      // Cabines: neus in de kopkleur met een voorruit erin
+      const cabine = (punt, richting) => {
+        const binnen = punt - richting * neus * 1.15;
+        ctx.fillStyle = st.kop;
+        ctx.fillRect(Math.min(punt, binnen), 0, neus * 1.15, h * (1 - st.onderHoogte) - h * 0.06);
+        ctx.fillStyle = st.glas;
+        ctx.beginPath();
+        const ruitOnder = st.neus === 'hoog' ? h * 0.36 : h * 0.48;
+        ctx.moveTo(punt - richting * neus * 0.95, h * 0.12);
+        ctx.lineTo(punt - richting * neus * 0.4, h * 0.12);
+        ctx.lineTo(punt - richting * neus * 0.06, ruitOnder);
+        ctx.lineTo(punt - richting * neus * 0.95, ruitOnder);
+        ctx.closePath();
+        ctx.fill();
+      };
+      if (voor) cabine(x0 + bakL, 1);
+      if (achter) cabine(x0, -1);
+
+      ctx.restore(); // einde clip
 
       // Randje voor definitie
-      ctx.strokeStyle = trein.rand;
-      ctx.lineWidth = Math.max(0.6, 0.45 * schaal);
-      bakPad(x0, kop);
+      ctx.strokeStyle = st.rand;
+      ctx.lineWidth = Math.max(0.6, 0.45 * s);
+      bakPad(x0, voor, achter);
       ctx.stroke();
+
+      // Dakapparatuur: koelunits op elke bak
+      ctx.fillStyle = st.dakApparatuur;
+      afgerondeRechthoek(ctx, x0 + bakL * (achter ? 0.4 : 0.28), -h * 0.08, bakL * 0.22, h * 0.1, 0.6 * s);
+      ctx.fill();
     }
 
-    // Pantograaf op het dak van de voorste bak — klein detail, maar meteen
-    // herkenbaar als trein in plaats van een langgerekte bus.
-    const px = x0Van(bakken - 1) + bakL * 0.34;
-    ctx.strokeStyle = trein.rand;
-    ctx.lineWidth = Math.max(0.5, 0.4 * schaal);
+    // Koplampen voor, sluitlichten achter
+    const lampY = h * (1 - st.onderHoogte) + h * 0.04;
+    ctx.fillStyle = '#fff6cf';
     ctx.beginPath();
-    ctx.moveTo(px - bakL * 0.1, 0);
-    ctx.lineTo(px - bakL * 0.05, -h * 0.2);
-    ctx.lineTo(px + bakL * 0.05, -h * 0.2);
-    ctx.lineTo(px + bakL * 0.1, 0);
+    ctx.arc(w - 0.9 * s, lampY, Math.max(0.7, 0.9 * s), 0, TAU);
+    ctx.fill();
+    ctx.fillStyle = '#e53935';
+    ctx.beginPath();
+    ctx.arc(0.9 * s, lampY, Math.max(0.7, 0.9 * s), 0, TAU);
+    ctx.fill();
+
+    // Pantograaf op het dak van de middelste (of voorste) bak: voetstuk,
+    // een ruitvormige schaar en de sleepstuk bovenop
+    const pb = Math.floor(bakken / 2);
+    const px = x0Van(pb) + bakL * 0.62;
+    const ph = h * 0.32;
+    ctx.fillStyle = st.dakApparatuur;
+    ctx.fillRect(px - bakL * 0.08, -h * 0.06, bakL * 0.16, h * 0.08);
+    ctx.strokeStyle = donker ? '#aab3c0' : '#4a5260';
+    ctx.lineWidth = Math.max(0.5, 0.45 * s);
+    ctx.beginPath();
+    ctx.moveTo(px - bakL * 0.07, -h * 0.05);
+    ctx.lineTo(px + bakL * 0.03, -ph * 0.55);
+    ctx.lineTo(px - bakL * 0.04, -ph);
+    ctx.moveTo(px - bakL * 0.1, -ph);
+    ctx.lineTo(px + bakL * 0.04, -ph);
     ctx.stroke();
 
     ctx.restore();
